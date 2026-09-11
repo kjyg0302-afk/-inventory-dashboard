@@ -10,6 +10,7 @@ import json
 import os
 from datetime import datetime
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -261,6 +262,74 @@ def fmt_won(n):
     return f"₩{round(n or 0):,}"
 
 
+ACCENT = "#5B8DEF"
+CHART_GRID = "#20293A"
+CHART_MUTED = "#8A96A8"
+
+
+def render_trend_chart(df, x_col, y_col, height=220):
+    """부드럽게 이어진 선 그래프 + 그라데이션 영역으로 추이를 그린다 (다크 테마 전용)."""
+    base = alt.Chart(df).encode(
+        x=alt.X(
+            f"{x_col}:O",
+            sort=None,
+            title=None,
+            axis=alt.Axis(
+                labelColor=CHART_MUTED,
+                labelFontSize=11,
+                domain=False,
+                ticks=False,
+                grid=False,
+            ),
+        ),
+        y=alt.Y(
+            f"{y_col}:Q",
+            title=None,
+            axis=alt.Axis(
+                labelColor=CHART_MUTED,
+                labelFontSize=11,
+                domain=False,
+                ticks=False,
+                gridColor=CHART_GRID,
+                tickCount=4,
+            ),
+        ),
+    )
+
+    area = base.mark_area(
+        interpolate="monotone",
+        color=alt.Gradient(
+            gradient="linear",
+            stops=[
+                alt.GradientStop(color=ACCENT, offset=0),
+                alt.GradientStop(color=ACCENT, offset=1),
+            ],
+            x1=1, y1=1, x2=1, y2=0,
+        ),
+        opacity=0.18,
+    )
+
+    line = base.mark_line(
+        interpolate="monotone",
+        color=ACCENT,
+        strokeWidth=2.5,
+        point=alt.OverlayMarkDef(filled=True, fill=ACCENT, stroke="#10141B", strokeWidth=1.5, size=55),
+    ).encode(
+        tooltip=[
+            alt.Tooltip(f"{x_col}:O", title=x_col),
+            alt.Tooltip(f"{y_col}:Q", title=y_col, format=",.0f"),
+        ]
+    )
+
+    chart = (
+        (area + line)
+        .properties(height=height)
+        .configure_view(strokeWidth=0)
+        .configure(background="transparent")
+    )
+    return chart
+
+
 # ---------------- 세션 상태 로드 ----------------
 
 if "inventory" not in st.session_state:
@@ -490,9 +559,9 @@ with tab_rebalance:
             if trend:
                 trend_df = pd.DataFrame(
                     {"주차": [f"{y}-{w}" for (y, w), _ in trend], "사용량": [v for _, v in trend]}
-                ).set_index("주차")
+                )
                 st.subheader("전체 캠프 합산 · 최근 12주 사용량 추이")
-                st.bar_chart(trend_df)
+                st.altair_chart(render_trend_chart(trend_df, "주차", "사용량"), use_container_width=True)
         else:
             st.caption("이 품목의 사용량 데이터가 아직 없습니다. (재고 수량만으로 비교합니다)")
 
