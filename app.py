@@ -15,6 +15,80 @@ import streamlit as st
 
 st.set_page_config(page_title="캠프 재고 현황판", layout="wide")
 
+st.markdown(
+    """
+    <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header[data-testid="stHeader"] {background: transparent;}
+
+    html, body, [class*="css"]  {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic",
+                     "Apple SD Gothic Neo", sans-serif !important;
+    }
+
+    .block-container {padding-top: 2rem; padding-bottom: 3rem; max-width: 1300px;}
+
+    /* KPI 카드 (st.metric) */
+    div[data-testid="stMetric"] {
+        background: #171D27;
+        border: 1px solid #262F3D;
+        border-radius: 10px;
+        padding: 14px 16px;
+    }
+    div[data-testid="stMetricLabel"] { color: #8A96A8; font-size: 12.5px; }
+    div[data-testid="stMetricValue"] { color: #E9EDF3; font-variant-numeric: tabular-nums; }
+    div[data-testid="stMetricDelta"] { font-size: 11.5px; }
+
+    /* 탭 */
+    button[data-testid="stTab"] { font-weight: 600; font-size: 14px; }
+    div[data-testid="stTabs"] button[aria-selected="true"] {
+        color: #5B8DEF !important;
+        border-bottom-color: #5B8DEF !important;
+    }
+
+    /* 버튼 */
+    div.stButton > button, div.stDownloadButton > button {
+        border-radius: 7px;
+        border: 1px solid #262F3D;
+        font-weight: 600;
+    }
+
+    /* 파일 업로더 */
+    section[data-testid="stFileUploaderDropzone"] {
+        background: #171D27;
+        border: 1px dashed #3A4658;
+        border-radius: 10px;
+    }
+    div[data-testid="stFileUploader"] label { font-weight: 600; font-size: 13px; }
+
+    /* 표 */
+    div[data-testid="stDataFrame"], div[data-testid="stTable"] {
+        border: 1px solid #262F3D;
+        border-radius: 10px;
+        overflow: hidden;
+    }
+
+    /* expander (품목 카드) */
+    details[data-testid="stExpander"] {
+        background: #171D27;
+        border: 1px solid #262F3D !important;
+        border-radius: 8px;
+        margin-bottom: 6px;
+    }
+    summary { font-weight: 600; font-size: 13.5px; }
+
+    /* 알림 배너 */
+    div[data-testid="stAlertContainer"] {
+        border-radius: 8px;
+    }
+
+    h1, h2, h3 { letter-spacing: -0.01em; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 INVENTORY_PATH = os.path.join(DATA_DIR, "inventory.json")
@@ -115,7 +189,17 @@ usage = st.session_state.usage
 
 col_title, col_upload1, col_upload2 = st.columns([3, 1, 1])
 with col_title:
-    st.title("📦 캠프 재고 현황판")
+    st.markdown(
+        """
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:2px;">
+            <div style="width:38px;height:38px;border-radius:8px;background:rgba(91,141,239,0.14);
+                        border:1px solid rgba(91,141,239,0.3);display:flex;align-items:center;
+                        justify-content:center;font-size:18px;">📦</div>
+            <div style="font-size:20px;font-weight:700;letter-spacing:-0.01em;">캠프 재고 현황판</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     updated = data["updatedAt"][:16].replace("T", " ") if data else "-"
     st.caption(f"전 캠프 재고 데이터 · 마지막 업데이트 {updated}")
 
