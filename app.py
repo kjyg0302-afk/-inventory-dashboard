@@ -97,6 +97,93 @@ USAGE_PATH = os.path.join(DATA_DIR, "usage.json")
 
 # ---------------- 데이터 파싱 ----------------
 
+# 사용량 엑셀의 캠프명과 재고 엑셀의 캠프명이 다르게 기록된 경우 합쳐주는 규칙.
+# (export_weekly_usage.py의 CAMP_NAME_MAP과 동일하게 유지)
+USAGE_CAMP_NAME_MAP = {
+    "부산캠프": "부산2캠프",
+    "부산정비": "부산2캠프",
+    "광주정비": "광주1캠프",
+    "대구정비": "대구1캠프",
+    "고양1정비": "고양1캠프",
+    "중앙정비허브": "천안캠프",
+    # 사용량 원본 엑셀에 섞여 있는 오타 보정
+    "서초캐프": "서초캠프",
+    "서초켐프": "서초캠프",
+    "고양2캠": "고양2캠프",
+}
+USAGE_EXCLUDE_CAMPS = {"김만수(가맹임대)영천"}
+
+
+def parse_usage_excel(file) -> dict:
+    """캠프별 사용량 엑셀(태블로 내보내기, 년도/해당주/고객명/부품번호별 로우 데이터)을
+    읽어 usage.json과 같은 구조로 변환."""
+    df = pd.read_excel(file, header=1)
+
+    required = {"년도", "해당주", "고객명", "부품번호", "합계 : 수량"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"사용량 엑셀 형식이 올바르지 않습니다. 다음 컬럼이 없습니다: {', '.join(missing)}"
+        )
+
+    # 부품번호가 없는 행(공임/입고/점검 등 재고와 무관한 항목, 소계/총합계 행)은 제외
+    df = df[df["부품번호"].notna() & (df["부품번호"].astype(str).str.strip() != "(비어 있음)")].copy()
+    if df.empty:
+        raise ValueError("부품번호가 있는 사용량 데이터를 찾을 수 없습니다.")
+
+    df["년도"] = pd.to_numeric(df["년도"], errors="coerce")
+    df["해당주"] = pd.to_numeric(df["해당주"], errors="coerce")
+    df = df.dropna(subset=["년도", "해당주"])
+    df["년도"] = df["년도"].astype(int)
+    df["해당주"] = df["해당주"].astype(int)
+
+    df["고객명"] = df["고객명"].astype(str).str.strip().map(lambda c: USAGE_CAMP_NAME_MAP.get(c, c))
+    df = df[~df["고객명"].isin(USAGE_EXCLUDE_CAMPS)]
+    # 캠프명이 깨져서 숫자만 들어간 오염된 행 제외
+    df = df[~df["고객명"].str.fullmatch(r"\d+")]
+
+    df["부품번호"] = df["부품번호"].astype(str).str.strip()
+    df["합계 : 수량"] = pd.to_numeric(df["합계 : 수량"], errors="coerce").fillna(0)
+
+    camp_week_count = (
+        df[["고객명", "년도", "해당주"]].drop_duplicates().groupby("고객명").size().to_dict()
+    )
+
+    agg = df.groupby(["부품번호", "고객명", "년도", "해당주"])["합계 : 수량"].sum()
+
+    by_part = {}
+    for (part_no, camp, year, week), qty in agg.items():
+        if qty == 0:
+            continue
+        by_part.setdefault(part_no, {}).setdefault(camp, []).append([int(year), int(week), float(qty)])
+
+    items = {}
+    for part_no, camps in by_part.items():
+        camp_out = {}
+        for camp, wlist in camps.items():
+            wlist.sort(key=lambda w: (w[0], w[1]))
+            total = sum(w[2] for w in wlist)
+            denom = camp_week_count.get(camp, 1) or 1
+            camp_out[camp] = {"w": wlist, "t": round(total, 2), "avg": round(total / denom, 2)}
+        items[part_no] = camp_out
+
+    if not items:
+        raise ValueError("집계할 수 있는 사용량 데이터를 찾을 수 없습니다.")
+
+    all_weeks = sorted({(y, w) for (_, _, y, w) in agg.index})
+
+    return {
+        "updatedAt": datetime.now().isoformat(),
+        "campWeekCount": camp_week_count,
+        "weekRange": {
+            "from": list(all_weeks[0]) if all_weeks else None,
+            "to": list(all_weeks[-1]) if all_weeks else None,
+            "count": len(all_weeks),
+        },
+        "items": items,
+    }
+
+
 def parse_inventory_excel(file) -> dict:
     """태블로 재고 내역 엑셀(피벗 구조)을 읽어 내부 JSON 구조로 변환."""
     df = pd.read_excel(file, header=None)
@@ -205,26 +292,36 @@ with col_title:
 
 with col_upload1:
     inv_file = st.file_uploader("재고 엑셀로 갱신", type=["xlsx", "xls"], key="inv_upload")
-    if inv_file is not None:
+    # file_uploader는 업로드된 파일을 계속 들고 있어서, 다른 상호작용으로 스크립트가
+    # 재실행될 때마다 이 블록이 다시 돌지 않도록 이미 처리한 파일인지 확인한다.
+    if inv_file is not None and st.session_state.get("_inv_file_id") != inv_file.file_id:
         try:
             parsed = parse_inventory_excel(inv_file)
             save_json(INVENTORY_PATH, parsed)
             st.session_state.inventory = parsed
             data = parsed
+            st.session_state["_inv_file_id"] = inv_file.file_id
             st.success(f"업데이트 완료 · 품목 {len(parsed['items']):,}개 · 캠프 {len(parsed['campsOrder'])}곳")
         except Exception as e:
             st.error(f"파일을 읽는 중 문제가 발생했습니다: {e}")
 
 with col_upload2:
-    usage_file = st.file_uploader("사용량 데이터 갱신 (JSON)", type=["json"], key="usage_upload")
-    if usage_file is not None:
+    usage_file = st.file_uploader(
+        "사용량 데이터 갱신 (엑셀 또는 JSON)", type=["xlsx", "xls", "json"], key="usage_upload"
+    )
+    if usage_file is not None and st.session_state.get("_usage_file_id") != usage_file.file_id:
         try:
-            parsed_usage = json.load(usage_file)
-            if "items" not in parsed_usage:
-                raise ValueError("사용량 JSON 형식이 올바르지 않습니다.")
-            save_json(USAGE_PATH, parsed_usage)
+            with st.spinner("사용량 데이터를 처리하는 중이에요... (대용량 엑셀은 시간이 걸릴 수 있어요)"):
+                if usage_file.name.lower().endswith(".json"):
+                    parsed_usage = json.load(usage_file)
+                    if "items" not in parsed_usage:
+                        raise ValueError("사용량 JSON 형식이 올바르지 않습니다.")
+                else:
+                    parsed_usage = parse_usage_excel(usage_file)
+                save_json(USAGE_PATH, parsed_usage)
             st.session_state.usage = parsed_usage
             usage = parsed_usage
+            st.session_state["_usage_file_id"] = usage_file.file_id
             st.success(f"사용량 갱신 완료 · 부품 {len(parsed_usage['items']):,}종")
         except Exception as e:
             st.error(f"사용량 파일을 읽는 중 문제가 발생했습니다: {e}")
