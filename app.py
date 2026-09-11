@@ -351,17 +351,17 @@ with tab_rebalance:
                     "팀": data["campToTeam"].get(camp, "-"),
                     "캠프": camp,
                     "재고 수량": qty,
-                    "주 평균 사용량": avg if avg is not None else "-",
-                    "소진 예상(주)": weeks_of_stock if weeks_of_stock is not None else "-",
+                    "주 평균 사용량": avg,  # None(NaN) 또는 숫자
+                    "소진 예상(주)": weeks_of_stock,  # None(NaN) 또는 숫자
                 }
             )
         df_rows = pd.DataFrame(rows).sort_values("재고 수량", ascending=False)
 
-        # 재분배 제안
-        shortages = df_rows[(df_rows["재고 수량"] == 0) & (df_rows["주 평균 사용량"] != "-") & (df_rows["주 평균 사용량"] > 0)]
+        # 재분배 제안 (NaN은 항상 False로 비교되므로 안전)
+        shortages = df_rows[(df_rows["재고 수량"] == 0) & (df_rows["주 평균 사용량"] > 0)]
         if not shortages.empty:
             donors = df_rows[(df_rows["재고 수량"] > 1)]
-            donors = donors[(donors["소진 예상(주)"] == "-") | (donors["소진 예상(주)"] > 4)]
+            donors = donors[donors["소진 예상(주)"].isna() | (donors["소진 예상(주)"] > 4)]
             donors = donors.sort_values("재고 수량", ascending=False)
             if not donors.empty:
                 top = donors.iloc[0]
@@ -399,8 +399,15 @@ with tab_rebalance:
         else:
             st.caption("이 품목의 사용량 데이터가 아직 없습니다. (재고 수량만으로 비교합니다)")
 
+        display_df = df_rows.copy()
+        display_df["주 평균 사용량"] = display_df["주 평균 사용량"].apply(
+            lambda v: "-" if pd.isna(v) else f"{v:g}개/주"
+        )
+        display_df["소진 예상(주)"] = display_df["소진 예상(주)"].apply(
+            lambda v: "-" if pd.isna(v) else f"{v:g}주"
+        )
         st.dataframe(
-            df_rows,
+            display_df,
             use_container_width=True,
             hide_index=True,
             column_config={
