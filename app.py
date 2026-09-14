@@ -1,18 +1,19 @@
 """
 캠프 재고 현황판 (Streamlit)
 - 태블로에서 받은 재고 엑셀(피벗 형식)과, scm_data.db에서 export_weekly_usage.py로
-  뽑은 주단위 사용량 JSON을 업로드하면 대시보드가 채워집니다.
-- 업로드한 데이터는 data/ 폴더에 저장되어, 다시 접속하는 모든 사람에게 그대로 보입니다.
-  (Streamlit Cloud에서 앱을 재배포하면 초기화될 수 있어요 — 정식 DB 연동 전까지의 임시 저장 방식입니다)
+  뽑은 주단위 사용량 JSON(또는 사용량 엑셀)을 업로드하면 대시보드가 채워집니다.
+- 업로드한 데이터는 Supabase(Postgres) DB에 저장되어, 다시 접속하는 모든 사람에게
+  그대로 보입니다. 앱이 잠들었다 깨어나거나 재배포되어도 DB에 저장된 데이터는
+  유지됩니다. (연결 설정은 .streamlit/secrets.toml.example, schema.sql 참고)
 """
 
 import json
-import os
 from datetime import datetime
 
 import altair as alt
 import pandas as pd
 import streamlit as st
+from sqlalchemy import text
 
 st.set_page_config(page_title="캠프 재고 현황판", layout="wide")
 
@@ -90,10 +91,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-os.makedirs(DATA_DIR, exist_ok=True)
-INVENTORY_PATH = os.path.join(DATA_DIR, "inventory.json")
-USAGE_PATH = os.path.join(DATA_DIR, "usage.json")
+DB_CONN_NAME = "supabase_db"
 
 
 # ---------------- 데이터 파싱 ----------------
@@ -242,16 +240,42 @@ def parse_inventory_excel(file) -> dict:
     }
 
 
-def load_json(path):
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return None
+def get_db_connection():
+    try:
+        return st.connection(DB_CONN_NAME, type="sql")
+    except Exception as e:
+        st.error(
+            "DB 연결 정보를 찾을 수 없습니다. .streamlit/secrets.toml.example을 참고해 "
+            "secrets.toml을 만들거나 Streamlit Cloud의 Secrets 설정에 등록해주세요.\n\n"
+            f"({e})"
+        )
+        st.stop()
 
 
-def save_json(path, obj):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False)
+def load_data(key):
+    """app_data 테이블에서 key에 해당하는 JSON 데이터를 읽어온다. 없으면 None."""
+    conn = get_db_connection()
+    df = conn.query("select data from app_data where key = :key", params={"key": key}, ttl=0)
+    if df.empty:
+        return None
+    return df.iloc[0]["data"]
+
+
+def save_data(key, obj):
+    """app_data 테이블에 key로 JSON 데이터를 저장(upsert)한다."""
+    conn = get_db_connection()
+    with conn.session as session:
+        session.execute(
+            text(
+                """
+                insert into app_data (key, data, updated_at)
+                values (:key, CAST(:data AS jsonb), now())
+                on conflict (key) do update set data = excluded.data, updated_at = excluded.updated_at
+                """
+            ),
+            {"key": key, "data": json.dumps(obj, ensure_ascii=False)},
+        )
+        session.commit()
 
 
 def fmt_int(n):
@@ -333,9 +357,9 @@ def render_trend_chart(df, x_col, y_col, height=220):
 # ---------------- 세션 상태 로드 ----------------
 
 if "inventory" not in st.session_state:
-    st.session_state.inventory = load_json(INVENTORY_PATH)
+    st.session_state.inventory = load_data("inventory")
 if "usage" not in st.session_state:
-    st.session_state.usage = load_json(USAGE_PATH)
+    st.session_state.usage = load_data("usage")
 
 data = st.session_state.inventory
 usage = st.session_state.usage
@@ -366,7 +390,7 @@ with col_upload1:
     if inv_file is not None and st.session_state.get("_inv_file_id") != inv_file.file_id:
         try:
             parsed = parse_inventory_excel(inv_file)
-            save_json(INVENTORY_PATH, parsed)
+            save_data("inventory", parsed)
             st.session_state.inventory = parsed
             data = parsed
             st.session_state["_inv_file_id"] = inv_file.file_id
@@ -387,7 +411,7 @@ with col_upload2:
                         raise ValueError("사용량 JSON 형식이 올바르지 않습니다.")
                 else:
                     parsed_usage = parse_usage_excel(usage_file)
-                save_json(USAGE_PATH, parsed_usage)
+                save_data("usage", parsed_usage)
             st.session_state.usage = parsed_usage
             usage = parsed_usage
             st.session_state["_usage_file_id"] = usage_file.file_id
