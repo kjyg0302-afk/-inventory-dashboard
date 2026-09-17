@@ -8,10 +8,12 @@
 """
 
 import json
-from datetime import datetime
+import time
+from datetime import datetime, timedelta, timezone
 
 import altair as alt
 import pandas as pd
+import requests
 import streamlit as st
 from sqlalchemy import text
 
@@ -343,6 +345,97 @@ def add_camp_stock(item, camp, qty, amt):
         item["x"][camp] = [qty, amt]
 
 
+# ---------------- 박스히어로(물류창고) 연동 ----------------
+# 박스히어로는 캠프와는 별개인 물류창고 시스템. 재고 수량/출고 이력만 제공한다.
+
+BOXHERO_API_BASE = "https://rest.boxhero-app.com/v1"
+
+
+def get_boxhero_token():
+    try:
+        return st.secrets["boxhero"]["api_token"]
+    except Exception:
+        return None
+
+
+def boxhero_get(path, params=None):
+    token = get_boxhero_token()
+    resp = requests.get(
+        f"{BOXHERO_API_BASE}{path}",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def boxhero_paginate(path, params=None, max_pages=50):
+    """cursor 기반 페이지네이션을 모두 순회해 items를 합쳐서 반환 (초당 5회 제한을 지키기 위해 살짝 대기)."""
+    params = dict(params or {})
+    params.setdefault("limit", 100)
+    all_items = []
+    for i in range(max_pages):
+        if i > 0:
+            time.sleep(0.25)
+        data = boxhero_get(path, params)
+        all_items.extend(data.get("items", []))
+        if not data.get("has_more"):
+            break
+        params["cursor"] = data["cursor"]
+    return all_items
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_boxhero_locations():
+    return boxhero_paginate("/locations")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_boxhero_items():
+    return boxhero_paginate("/items")
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_boxhero_recent_out_transactions(days=30):
+    """최근 days일 이내의 출고 트랜잭션을 가져온다 (최신순이라 기간을 벗어나면 즉시 중단).
+
+    목록 API는 품목별 상세가 없어, 건별로 상세를 한 번씩 더 호출해 판매가 기준
+    출고 금액(amt)을 계산해 붙인다. 건수가 많으면 다소 시간이 걸릴 수 있다.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    summaries = []
+    params = {"type": "out", "limit": 100}
+    for i in range(50):
+        if i > 0:
+            time.sleep(0.25)
+        data = boxhero_get("/transactions", params)
+        stopped = False
+        for tx in data.get("items", []):
+            tx_time = datetime.fromisoformat(tx["transaction_time"].replace("Z", "+00:00"))
+            if tx_time < cutoff:
+                stopped = True
+                break
+            summaries.append(tx)
+        if stopped or not data.get("has_more"):
+            break
+        params["cursor"] = data["cursor"]
+
+    price_by_id = {it["id"]: float(it.get("price") or 0) for it in fetch_boxhero_items()}
+
+    results = []
+    for i, tx in enumerate(summaries):
+        if i > 0:
+            time.sleep(0.2)
+        detail = boxhero_get(f"/transactions/{tx['id']}")["item"]
+        amt = sum(
+            abs(line.get("quantity", 0)) * price_by_id.get(line["item"]["id"], 0)
+            for line in detail.get("items", [])
+        )
+        results.append({**tx, "amt": amt})
+    return results
+
+
 def fmt_int(n):
     return f"{round(n or 0):,}"
 
@@ -527,13 +620,15 @@ def get_usage_for_code(code):
 
 # ---------------- 탭 ----------------
 
-tab_overview, tab_camps, tab_items, tab_rebalance, tab_usage_amount = st.tabs(
+tab_overview, tab_camps, tab_items, tab_rebalance, tab_usage_amount, tab_warehouse, tab_total = st.tabs(
     [
         ":material/dashboard: 개요",
         ":material/location_on: 캠프별 현황",
         ":material/search: 품목 검색",
         ":material/sync_alt: 재분배 도우미",
         ":material/payments: 월별 사용 금액",
+        ":material/warehouse: 창고 현황",
+        ":material/inventory: 지바이크 전체 재고",
     ]
 )
 
@@ -566,8 +661,8 @@ with tab_camps:
         camp_df.sort_values(sort_col, ascending=ascending),
         hide_index=True,
         column_config={
-            "재고 수량": st.column_config.NumberColumn(format="%d개"),
-            "재고 금액": st.column_config.NumberColumn(format="₩%d"),
+            "재고 수량": st.column_config.NumberColumn(format="%,d개"),
+            "재고 금액": st.column_config.NumberColumn(format="₩%,d"),
         },
     )
 
@@ -803,9 +898,9 @@ with tab_rebalance:
             display_df,
             hide_index=True,
             column_config={
-                "재고 수량": st.column_config.NumberColumn(format="%d개"),
-                "가용재고": st.column_config.NumberColumn(format="%d개"),
-                "이동중재고": st.column_config.NumberColumn(format="%d개"),
+                "재고 수량": st.column_config.NumberColumn(format="%,d개"),
+                "가용재고": st.column_config.NumberColumn(format="%,d개"),
+                "이동중재고": st.column_config.NumberColumn(format="%,d개"),
             },
         )
 
@@ -845,7 +940,7 @@ with tab_usage_amount:
         st.dataframe(
             overall_trend_df.sort_values("월", ascending=False),
             hide_index=True,
-            column_config={"금액": st.column_config.NumberColumn(format="₩%d")},
+            column_config={"금액": st.column_config.NumberColumn(format="₩%,d")},
         )
 
         camp_totals = (
@@ -868,7 +963,7 @@ with tab_usage_amount:
             st.dataframe(
                 camp_trend_df.sort_values("월", ascending=False),
                 hide_index=True,
-                column_config={"금액": st.column_config.NumberColumn(format="₩%d")},
+                column_config={"금액": st.column_config.NumberColumn(format="₩%,d")},
             )
 
         st.subheader("캠프별 총 사용 금액 순위 (전체 기간 합계)")
@@ -899,8 +994,218 @@ with tab_usage_amount:
         st.dataframe(
             camp_totals,
             hide_index=True,
-            column_config={"총 사용 금액": st.column_config.NumberColumn(format="₩%d")},
+            column_config={"총 사용 금액": st.column_config.NumberColumn(format="₩%,d")},
         )
+
+with tab_total:
+    if not get_boxhero_token():
+        st.info(
+            "박스히어로 연동이 설정되면 창고 + 캠프 전체 재고를 함께 볼 수 있어요.",
+            icon=":material/link_off:",
+        )
+    else:
+        try:
+            with st.spinner("박스히어로에서 창고 데이터를 가져오는 중이에요..."):
+                wh_items = fetch_boxhero_items()
+        except Exception as e:
+            st.error(f"박스히어로 연동 중 문제가 발생했습니다: {e}", icon=":material/error:")
+        else:
+            warehouse_qty = sum(it.get("quantity", 0) for it in wh_items)
+            warehouse_amt = sum(it.get("quantity", 0) * float(it.get("price") or 0) for it in wh_items)
+            camp_qty = grand_qty
+            camp_amt = grand_amt
+            total_qty = warehouse_qty + camp_qty
+            total_amt = warehouse_amt + camp_amt
+
+            st.caption("수량 기준")
+            k1, k2, k3 = st.columns(3)
+            k1.metric("지바이크 전체 재고 수량", f"{fmt_int(total_qty)}개", border=True)
+            k2.metric("캠프 재고 (36곳 합계)", f"{fmt_int(camp_qty)}개", border=True)
+            k3.metric("물류창고 재고", f"{fmt_int(warehouse_qty)}개", border=True)
+
+            st.caption("금액 기준")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("지바이크 전체 재고 금액", fmt_won(total_amt), border=True)
+            m2.metric("캠프 재고 금액", fmt_won(camp_amt), border=True)
+            m3.metric("물류창고 재고 금액", fmt_won(warehouse_amt), border=True)
+            st.caption(
+                "창고 재고 금액은 원가(cost) 입력이 대부분 비어있어 판매가(price) 기준으로 계산했어요 "
+                "— 캠프 재고 금액과 산정 기준이 달라 완전히 동일한 비교는 아니에요."
+            )
+
+            breakdown_df = pd.DataFrame(
+                {"구분": ["캠프 (36곳 합계)", "물류창고"], "재고 금액": [camp_amt, warehouse_amt]}
+            )
+            st.subheader("창고 vs 캠프 재고 금액 비중")
+            breakdown_bar = (
+                alt.Chart(breakdown_df)
+                .mark_bar(color=ACCENT, cornerRadiusTopRight=4, cornerRadiusBottomRight=4, height=32)
+                .encode(
+                    y=alt.Y(
+                        "구분:N",
+                        sort="-x",
+                        title=None,
+                        axis=alt.Axis(labelColor=CHART_MUTED, labelFontSize=12, domain=False, ticks=False),
+                    ),
+                    x=alt.X(
+                        "재고 금액:Q",
+                        title=None,
+                        axis=alt.Axis(
+                            labelColor=CHART_MUTED, labelFontSize=11, gridColor=CHART_GRID, domain=False, ticks=False
+                        ),
+                    ),
+                    tooltip=[alt.Tooltip("구분:N"), alt.Tooltip("재고 금액:Q", format=",.0f")],
+                )
+                .properties(height=140)
+                .configure_view(strokeWidth=0)
+                .configure(background="transparent")
+            )
+            st.altair_chart(breakdown_bar, width="stretch")
+
+            st.subheader("SKU별 창고-캠프 재고 비교")
+            camp_by_sku = {
+                it["c"].strip().upper(): it for it in data["items"] if it.get("c")
+            }
+            wh_by_sku = {it["sku"].strip().upper(): it for it in wh_items if it.get("sku")}
+            all_skus = set(camp_by_sku) | set(wh_by_sku)
+
+            compare_rows = []
+            for sku in all_skus:
+                camp_it = camp_by_sku.get(sku)
+                wh_it = wh_by_sku.get(sku)
+                camp_q = camp_it["q"] if camp_it else 0
+                camp_a = camp_it["a"] if camp_it else 0
+                wh_q = wh_it.get("quantity", 0) if wh_it else 0
+                wh_price = float(wh_it.get("price") or 0) if wh_it else 0
+                wh_a = wh_q * wh_price
+                name = camp_it["n"] if camp_it else wh_it["name"]
+                compare_rows.append(
+                    {
+                        "SKU": sku,
+                        "품명": name,
+                        "물류창고 수량": wh_q,
+                        "캠프 재고 수량": camp_q,
+                        "합계 수량": wh_q + camp_q,
+                        "재고 금액": wh_a + camp_a,
+                    }
+                )
+            compare_df = pd.DataFrame(compare_rows).sort_values("재고 금액", ascending=False)
+
+            compare_search = st.text_input("SKU 또는 품명으로 검색", "", key="total_compare_search")
+            if compare_search.strip():
+                q = compare_search.strip().lower()
+                compare_df = compare_df[
+                    compare_df["SKU"].str.lower().str.contains(q, regex=False)
+                    | compare_df["품명"].str.lower().str.contains(q, regex=False)
+                ]
+            st.caption(f"{len(compare_df):,}개 SKU (창고·캠프 어느 한쪽에라도 있는 품목 전체)")
+            st.dataframe(
+                compare_df,
+                hide_index=True,
+                column_config={
+                    "물류창고 수량": st.column_config.NumberColumn(format="%,d개"),
+                    "캠프 재고 수량": st.column_config.NumberColumn(format="%,d개"),
+                    "합계 수량": st.column_config.NumberColumn(format="%,d개"),
+                    "재고 금액": st.column_config.NumberColumn(format="₩%,d"),
+                },
+            )
+
+with tab_warehouse:
+    if not get_boxhero_token():
+        st.info(
+            "박스히어로 API 토큰이 설정되지 않았어요. .streamlit/secrets.toml.example을 참고해 등록해주세요.",
+            icon=":material/link_off:",
+        )
+    else:
+        try:
+            with st.spinner("박스히어로에서 창고 데이터를 가져오는 중이에요..."):
+                wh_locations = fetch_boxhero_locations()
+                wh_items = fetch_boxhero_items()
+        except Exception as e:
+            st.error(f"박스히어로 연동 중 문제가 발생했습니다: {e}", icon=":material/error:")
+        else:
+            warehouse_qty = sum(it.get("quantity", 0) for it in wh_items)
+            warehouse_amt = sum(it.get("quantity", 0) * float(it.get("price") or 0) for it in wh_items)
+            warehouse_name = wh_locations[0]["name"] if wh_locations else "물류창고"
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("창고 재고 수량", f"{fmt_int(warehouse_qty)}개", border=True)
+            k2.metric("창고 재고 금액", fmt_won(warehouse_amt), border=True)
+            k3.metric("창고 품목 수", f"{len(wh_items):,}종", border=True)
+            k4.metric("창고", warehouse_name, border=True)
+            st.caption(
+                "박스히어로 API에서 5분 주기로 새로 가져온 데이터예요. "
+                "창고 재고 금액은 원가(cost) 입력이 대부분 비어있어 판매가(price) 기준으로 계산했어요."
+            )
+
+            st.subheader("품목별 창고 재고")
+            wh_search = st.text_input("품목명 또는 SKU로 검색", "", key="warehouse_search")
+            wh_df = pd.DataFrame(
+                [
+                    {
+                        "SKU": it["sku"],
+                        "품목명": it["name"],
+                        "재고 수량": it.get("quantity", 0),
+                        "단가": float(it.get("price") or 0),
+                        "재고 금액": it.get("quantity", 0) * float(it.get("price") or 0),
+                    }
+                    for it in wh_items
+                ]
+            ).sort_values("재고 금액", ascending=False)
+            if wh_search.strip():
+                q = wh_search.strip().lower()
+                wh_df = wh_df[
+                    wh_df["품목명"].str.lower().str.contains(q, regex=False)
+                    | wh_df["SKU"].str.lower().str.contains(q, regex=False)
+                ]
+            st.dataframe(
+                wh_df,
+                hide_index=True,
+                column_config={
+                    "재고 수량": st.column_config.NumberColumn(format="%,d개"),
+                    "단가": st.column_config.NumberColumn(format="₩%,d"),
+                    "재고 금액": st.column_config.NumberColumn(format="₩%,d"),
+                },
+            )
+
+            st.subheader("최근 30일 출고 금액")
+            try:
+                with st.spinner("건별 품목 상세를 조회해 판매가 기준 출고 금액을 계산하는 중이에요... (건수가 많으면 1~2분 걸릴 수 있어요)"):
+                    out_txs = fetch_boxhero_recent_out_transactions(days=30)
+            except Exception as e:
+                st.error(f"출고 이력을 가져오는 중 문제가 발생했습니다: {e}", icon=":material/error:")
+            else:
+                if not out_txs:
+                    st.caption("최근 30일간 출고 이력이 없어요.")
+                else:
+                    total_out_amt = sum(tx["amt"] for tx in out_txs)
+                    st.caption(f"최근 30일 출고 금액 합계: {fmt_won(total_out_amt)} (판매가 기준, {len(out_txs):,}건)")
+
+                    daily = {}
+                    for tx in out_txs:
+                        day = tx["transaction_time"][:10]
+                        daily[day] = daily.get(day, 0) + tx["amt"]
+                    daily_df = pd.DataFrame(sorted(daily.items()), columns=["날짜", "출고 금액"])
+                    st.altair_chart(render_trend_chart(daily_df, "날짜", "출고 금액"), width="stretch")
+
+                    tx_rows = [
+                        {
+                            "일시": tx["transaction_time"][:16].replace("T", " "),
+                            "출고 금액": tx["amt"],
+                            "출고 수량": abs(tx.get("total_quantity", 0)),
+                            "품목 수": tx.get("count_of_items", 0),
+                            "메모": tx.get("memo", ""),
+                        }
+                        for tx in out_txs
+                    ]
+                    st.dataframe(
+                        pd.DataFrame(tx_rows),
+                        hide_index=True,
+                        column_config={
+                            "출고 금액": st.column_config.NumberColumn(format="₩%,d"),
+                            "출고 수량": st.column_config.NumberColumn(format="%,d개"),
+                        },
+                    )
 
 st.divider()
 st.caption("업로드한 데이터는 이 앱에 접속하는 모든 사람에게 공유됩니다. 재고 엑셀/사용량 JSON을 다시 올리면 바로 반영돼요.")
