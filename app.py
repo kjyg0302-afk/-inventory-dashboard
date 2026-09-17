@@ -278,6 +278,121 @@ def save_data(key, obj):
         session.commit()
 
 
+def list_transfer_requests(item_code):
+    """특정 품목의 이관 요청 이력을 최신순으로 반환."""
+    conn = get_db_connection()
+    return conn.query(
+        "select * from transfer_requests where item_code = :item_code order by requested_at desc",
+        params={"item_code": item_code},
+        ttl=0,
+    )
+
+
+def create_transfer_request(item_code, item_name, from_camp, to_camp, qty, requested_by):
+    conn = get_db_connection()
+    with conn.session as session:
+        session.execute(
+            text(
+                """
+                insert into transfer_requests (item_code, item_name, from_camp, to_camp, qty, requested_by)
+                values (:item_code, :item_name, :from_camp, :to_camp, :qty, :requested_by)
+                """
+            ),
+            {
+                "item_code": item_code,
+                "item_name": item_name,
+                "from_camp": from_camp,
+                "to_camp": to_camp,
+                "qty": qty,
+                "requested_by": requested_by,
+            },
+        )
+        session.commit()
+
+
+def approve_transfer_request(request_id, approved_by):
+    """요청을 승인하고 이동중 상태로 전환. 실제 재고 차감은 입고완료 시점에 이루어진다."""
+    conn = get_db_connection()
+    with conn.session as session:
+        session.execute(
+            text(
+                """
+                update transfer_requests
+                set status = 'in_transit', approved_by = :approved_by, approved_at = now()
+                where id = :id and status = 'requested'
+                """
+            ),
+            {"id": request_id, "approved_by": approved_by},
+        )
+        session.commit()
+
+
+def reject_transfer_request(request_id, rejected_by):
+    conn = get_db_connection()
+    with conn.session as session:
+        session.execute(
+            text(
+                """
+                update transfer_requests
+                set status = 'rejected', approved_by = :rejected_by, approved_at = now()
+                where id = :id and status = 'requested'
+                """
+            ),
+            {"id": request_id, "rejected_by": rejected_by},
+        )
+        session.commit()
+
+
+def complete_transfer_request(request_id, received_by, amt):
+    """입고완료 처리. 실제 이동한 금액(amt)을 함께 기록한다."""
+    conn = get_db_connection()
+    with conn.session as session:
+        session.execute(
+            text(
+                """
+                update transfer_requests
+                set status = 'completed', received_by = :received_by, received_at = now(), amt = :amt
+                where id = :id and status = 'in_transit'
+                """
+            ),
+            {"id": request_id, "received_by": received_by, "amt": amt},
+        )
+        session.commit()
+
+
+def find_item_by_code(inventory, code):
+    for it in inventory["items"]:
+        if it["c"] == code:
+            return it
+    return None
+
+
+def deduct_camp_stock(item, camp, qty):
+    """캠프 재고에서 qty만큼 차감하고, 차감된 금액을 반환한다 (재고 부족 시 ValueError)."""
+    pair = item["x"].get(camp)
+    have = pair[0] if pair else 0
+    if have < qty:
+        raise ValueError(f"{camp}의 재고가 부족합니다. (보유 {have}개, 요청 {qty}개)")
+    q, a = pair
+    unit_amt = a / q if q else 0
+    moved_amt = round(unit_amt * qty)
+    new_q, new_a = q - qty, a - moved_amt
+    if new_q <= 0:
+        del item["x"][camp]
+    else:
+        item["x"][camp] = [new_q, new_a]
+    return moved_amt
+
+
+def add_camp_stock(item, camp, qty, amt):
+    """캠프 재고에 qty/amt만큼 더한다 (해당 캠프에 재고가 없었다면 새로 만든다)."""
+    pair = item["x"].get(camp)
+    if pair:
+        item["x"][camp] = [pair[0] + qty, pair[1] + amt]
+    else:
+        item["x"][camp] = [qty, amt]
+
+
 def fmt_int(n):
     return f"{round(n or 0):,}"
 
@@ -529,10 +644,19 @@ with tab_rebalance:
 
     if selected:
         item_usage = get_usage_for_code(selected["c"])
+        req_df = list_transfer_requests(selected["c"])
+        if not req_df.empty:
+            # 승인(이동중) 상태는 아직 실제 재고에서 빠지지 않았지만(입고완료 시에만 차감),
+            # 이미 다른 곳으로 나가기로 확정된 수량이라 "가용재고" 계산에서는 미리 빼준다.
+            in_transit_out = req_df[req_df["status"] == "in_transit"].groupby("from_camp")["qty"].sum()
+        else:
+            in_transit_out = pd.Series(dtype=int)
+
         rows = []
         for camp in data["campsOrder"]:
             pair = selected["x"].get(camp)
             qty = pair[0] if pair else 0
+            intransit_qty = int(in_transit_out.get(camp, 0))
             u = item_usage.get(camp) if item_usage else None
             avg = u["avg"] if u else None
             weeks_of_stock = round(qty / avg, 1) if avg and avg > 0 else None
@@ -541,6 +665,8 @@ with tab_rebalance:
                     "팀": data["campToTeam"].get(camp, "-"),
                     "캠프": camp,
                     "재고 수량": qty,
+                    "가용재고": qty - intransit_qty,  # 재고 수량 - 이동중(승인됐지만 아직 미입고)
+                    "이동중재고": intransit_qty,  # 승인되어 이 캠프에서 나가는 중인 수량 (입고완료 전)
                     "주 평균 사용량": avg,  # None(NaN) 또는 숫자
                     "소진 예상(주)": weeks_of_stock,  # None(NaN) 또는 숫자
                 }
@@ -548,6 +674,7 @@ with tab_rebalance:
         df_rows = pd.DataFrame(rows).sort_values("재고 수량", ascending=False)
 
         # 재분배 제안 (NaN은 항상 False로 비교되므로 안전)
+        suggested_transfer = None
         shortages = df_rows[(df_rows["재고 수량"] == 0) & (df_rows["주 평균 사용량"] > 0)]
         if not shortages.empty:
             donors = df_rows[(df_rows["재고 수량"] > 1)]
@@ -557,6 +684,7 @@ with tab_rebalance:
                 top = donors.iloc[0]
                 move_qty = max(1, int(top["재고 수량"] // 2))
                 to_camps = ", ".join(shortages["캠프"].head(3).tolist())
+                suggested_transfer = {"from": top["캠프"], "to": shortages["캠프"].iloc[0], "qty": move_qty}
                 st.warning(
                     f"**{top['캠프']}**에 {fmt_int(top['재고 수량'])}개 보유 중인 반면, **{to_camps}**에는 재고가 없습니다. "
                     f"약 {move_qty}개 이동을 검토해보세요. (최근 사용량 데이터를 반영한 제안)"
@@ -568,10 +696,114 @@ with tab_rebalance:
                 top = with_stock.iloc[0]
                 move_qty = max(1, int(top["재고 수량"] // 2))
                 to_camps = ", ".join(empty["캠프"].head(3).tolist())
+                suggested_transfer = {"from": top["캠프"], "to": empty["캠프"].iloc[0], "qty": move_qty}
                 st.warning(
                     f"**{top['캠프']}**에 {fmt_int(top['재고 수량'])}개 보유 중인 반면, **{to_camps}**에는 재고가 없습니다. "
                     f"약 {move_qty}개 이동을 검토해보세요. (사용량 데이터가 없어 재고량만 기준으로 한 참고용 제안)"
                 )
+
+        st.divider()
+        st.subheader("캠프 간 재고 이관")
+        st.caption("요청 → 승인(이동중) → 입고완료 순서로 처리돼요. 실제 재고 수량은 입고완료 시점에 보내는 캠프에서 빠지고 받는 캠프에 더해지며, 승인되면 그 전까지는 \"가용재고\"에서만 미리 제외되어 보입니다.")
+
+        my_name = st.text_input(
+            "내 이름", value=st.session_state.get("transfer_my_name", ""), key="transfer_my_name_input"
+        )
+        st.session_state["transfer_my_name"] = my_name
+
+        item_code = selected["c"]
+        with st.form(f"transfer_request_form_{item_code}"):
+            camps_order = data["campsOrder"]
+            default_from = camps_order.index(suggested_transfer["from"]) if suggested_transfer else 0
+            default_to = camps_order.index(suggested_transfer["to"]) if suggested_transfer else min(1, len(camps_order) - 1)
+            fc1, fc2, fc3 = st.columns([2, 2, 1])
+            with fc1:
+                from_camp_sel = st.selectbox("보내는 캠프", camps_order, index=default_from)
+            with fc2:
+                to_camp_sel = st.selectbox("받는 캠프", camps_order, index=default_to)
+            with fc3:
+                qty_sel = st.number_input(
+                    "수량", min_value=1, step=1, value=suggested_transfer["qty"] if suggested_transfer else 1
+                )
+            if st.form_submit_button("이관 요청"):
+                if not my_name.strip():
+                    st.error("내 이름을 먼저 입력해주세요.")
+                elif from_camp_sel == to_camp_sel:
+                    st.error("보내는 캠프와 받는 캠프가 같습니다.")
+                else:
+                    create_transfer_request(
+                        item_code, selected["n"], from_camp_sel, to_camp_sel, int(qty_sel), my_name.strip()
+                    )
+                    st.success("이관 요청을 등록했습니다.")
+                    st.rerun()
+
+        req_df = list_transfer_requests(item_code)
+        requested_rows = req_df[req_df["status"] == "requested"] if not req_df.empty else req_df
+        in_transit_rows = req_df[req_df["status"] == "in_transit"] if not req_df.empty else req_df
+        done_rows = req_df[req_df["status"].isin(["completed", "rejected"])] if not req_df.empty else req_df
+
+        if not requested_rows.empty:
+            st.markdown("**요청중**")
+            for _, r in requested_rows.iterrows():
+                c1, c2, c3 = st.columns([5, 1, 1])
+                c1.write(f"{r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · 요청자: {r['requested_by']}")
+                if c2.button("승인", key=f"approve_{r['id']}"):
+                    if not my_name.strip():
+                        st.error("내 이름을 먼저 입력해주세요.")
+                    else:
+                        item = find_item_by_code(data, item_code)
+                        current_qty = item["x"].get(r["from_camp"], [0, 0])[0]
+                        already_out = int(
+                            req_df[
+                                (req_df["status"] == "in_transit") & (req_df["from_camp"] == r["from_camp"])
+                            ]["qty"].sum()
+                        )
+                        available = current_qty - already_out
+                        if available < r["qty"]:
+                            st.error(
+                                f"{r['from_camp']}의 가용재고가 부족합니다. "
+                                f"(가용 {available}개, 요청 {int(r['qty'])}개)"
+                            )
+                        else:
+                            approve_transfer_request(r["id"], my_name.strip())
+                            st.success("승인했습니다. 이동중 상태로 전환됩니다.")
+                            st.rerun()
+                if c3.button("거절", key=f"reject_{r['id']}"):
+                    if not my_name.strip():
+                        st.error("내 이름을 먼저 입력해주세요.")
+                    else:
+                        reject_transfer_request(r["id"], my_name.strip())
+                        st.rerun()
+
+        if not in_transit_rows.empty:
+            st.markdown("**이동중**")
+            for _, r in in_transit_rows.iterrows():
+                c1, c2 = st.columns([6, 1])
+                c1.write(
+                    f"{r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · 승인자: {r['approved_by']}"
+                )
+                if c2.button("입고완료", key=f"receive_{r['id']}"):
+                    if not my_name.strip():
+                        st.error("내 이름을 먼저 입력해주세요.")
+                    else:
+                        item = find_item_by_code(data, item_code)
+                        try:
+                            moved_amt = deduct_camp_stock(item, r["from_camp"], int(r["qty"]))
+                        except ValueError as e:
+                            st.error(str(e))
+                        else:
+                            add_camp_stock(item, r["to_camp"], int(r["qty"]), moved_amt)
+                            save_data("inventory", data)
+                            complete_transfer_request(r["id"], my_name.strip(), moved_amt)
+                            st.success("입고 완료 처리했습니다.")
+                            st.rerun()
+
+        if not done_rows.empty:
+            with st.expander(f"완료/거절 내역 ({len(done_rows)}건)"):
+                for _, r in done_rows.iterrows():
+                    label = "입고완료" if r["status"] == "completed" else "거절"
+                    who = r["received_by"] if r["status"] == "completed" else r["approved_by"]
+                    st.caption(f"[{label}] {r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · {who}")
 
         if item_usage:
             weekly_totals = {}
@@ -602,6 +834,8 @@ with tab_rebalance:
             hide_index=True,
             column_config={
                 "재고 수량": st.column_config.NumberColumn(format="%d개"),
+                "가용재고": st.column_config.NumberColumn(format="%d개"),
+                "이동중재고": st.column_config.NumberColumn(format="%d개"),
             },
         )
 
