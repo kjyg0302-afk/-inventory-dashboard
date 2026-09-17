@@ -4,4 +4,33 @@ primaryColor = "#5B8DEF"
 backgroundColor = "#10141B"
 secondaryBackgroundColor = "#171D27"
 textColor = "#E9EDF3"
-font = "sans serif"
+borderColor = "#262F3D"
+linkColor = "#5B8DEF"
+linkUnderline = false
+
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@600;700&display=swap"
+baseFontSize = 14
+baseFontWeight = 400
+headingFontSizes = ["26px", "20px", "17px", "15px", "14px", "13px"]
+headingFontWeights = [700, 700, 600, 600, 500, 500]
+
+baseRadius = "10px"
+buttonRadius = "8px"
+showWidgetBorder = true
+
+dataframeBorderColor = "#262F3D"
+dataframeHeaderBackgroundColor = "#171D27"
+
+greenColor = "#34D399"
+redColor = "#F0678C"
+orangeColor = "#F5A623"
+blueColor = "#5B8DEF"
+violetColor = "#9B8CFB"
+grayColor = "#8A96A8"
+
+chartCategoricalColors = ["#5B8DEF", "#34D399", "#F5A623", "#F0678C", "#9B8CFB", "#4FD1E8", "#E2B93B"]
+chartSequentialColors = [
+    "#0B0F17", "#0E1B2E", "#122844", "#17355B", "#1D4373",
+    "#25528C", "#2F63A6", "#4779BE", "#6C9AD3", "#9EC3E8",
+]

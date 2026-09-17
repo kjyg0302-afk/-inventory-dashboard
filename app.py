@@ -23,69 +23,7 @@ st.markdown(
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header[data-testid="stHeader"] {background: transparent;}
-
-    html, body, [class*="css"]  {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic",
-                     "Apple SD Gothic Neo", sans-serif !important;
-    }
-
     .block-container {padding-top: 2rem; padding-bottom: 3rem; max-width: 1300px;}
-
-    /* KPI 카드 (st.metric) */
-    div[data-testid="stMetric"] {
-        background: #171D27;
-        border: 1px solid #262F3D;
-        border-radius: 10px;
-        padding: 14px 16px;
-    }
-    div[data-testid="stMetricLabel"] { color: #8A96A8; font-size: 12.5px; }
-    div[data-testid="stMetricValue"] { color: #E9EDF3; font-variant-numeric: tabular-nums; }
-    div[data-testid="stMetricDelta"] { font-size: 11.5px; }
-
-    /* 탭 */
-    button[data-testid="stTab"] { font-weight: 600; font-size: 14px; }
-    div[data-testid="stTabs"] button[aria-selected="true"] {
-        color: #5B8DEF !important;
-        border-bottom-color: #5B8DEF !important;
-    }
-
-    /* 버튼 */
-    div.stButton > button, div.stDownloadButton > button {
-        border-radius: 7px;
-        border: 1px solid #262F3D;
-        font-weight: 600;
-    }
-
-    /* 파일 업로더 */
-    section[data-testid="stFileUploaderDropzone"] {
-        background: #171D27;
-        border: 1px dashed #3A4658;
-        border-radius: 10px;
-    }
-    div[data-testid="stFileUploader"] label { font-weight: 600; font-size: 13px; }
-
-    /* 표 */
-    div[data-testid="stDataFrame"], div[data-testid="stTable"] {
-        border: 1px solid #262F3D;
-        border-radius: 10px;
-        overflow: hidden;
-    }
-
-    /* expander (품목 카드) */
-    details[data-testid="stExpander"] {
-        background: #171D27;
-        border: 1px solid #262F3D !important;
-        border-radius: 8px;
-        margin-bottom: 6px;
-    }
-    summary { font-weight: 600; font-size: 13.5px; }
-
-    /* 알림 배너 */
-    div[data-testid="stAlertContainer"] {
-        border-radius: 8px;
-    }
-
-    h1, h2, h3 { letter-spacing: -0.01em; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -258,7 +196,8 @@ def get_db_connection():
         st.error(
             "DB 연결 정보를 찾을 수 없습니다. .streamlit/secrets.toml.example을 참고해 "
             "secrets.toml을 만들거나 Streamlit Cloud의 Secrets 설정에 등록해주세요.\n\n"
-            f"({e})"
+            f"({e})",
+            icon=":material/error:",
         )
         st.stop()
 
@@ -498,10 +437,11 @@ with col_title:
     st.markdown(
         """
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:2px;">
-            <div style="width:38px;height:38px;border-radius:8px;background:rgba(91,141,239,0.14);
-                        border:1px solid rgba(91,141,239,0.3);display:flex;align-items:center;
-                        justify-content:center;font-size:18px;">📦</div>
-            <div style="font-size:20px;font-weight:700;letter-spacing:-0.01em;">캠프 재고 현황판</div>
+            <div style="width:40px;height:40px;border-radius:10px;
+                        background:linear-gradient(135deg, rgba(91,141,239,0.28), rgba(91,141,239,0.06));
+                        border:1px solid rgba(91,141,239,0.35);display:flex;align-items:center;
+                        justify-content:center;font-size:19px;">📦</div>
+            <div style="font-size:21px;font-weight:700;letter-spacing:-0.01em;">캠프 재고 현황판</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -520,9 +460,9 @@ with col_upload1:
             st.session_state.inventory = parsed
             data = parsed
             st.session_state["_inv_file_id"] = inv_file.file_id
-            st.success(f"업데이트 완료 · 품목 {len(parsed['items']):,}개 · 캠프 {len(parsed['campsOrder'])}곳")
+            st.success(f"업데이트 완료 · 품목 {len(parsed['items']):,}개 · 캠프 {len(parsed['campsOrder'])}곳", icon=":material/check_circle:")
         except Exception as e:
-            st.error(f"파일을 읽는 중 문제가 발생했습니다: {e}")
+            st.error(f"파일을 읽는 중 문제가 발생했습니다: {e}", icon=":material/error:")
 
 with col_upload2:
     usage_file = st.file_uploader(
@@ -541,18 +481,18 @@ with col_upload2:
             st.session_state.usage = parsed_usage
             usage = parsed_usage
             st.session_state["_usage_file_id"] = usage_file.file_id
-            st.success(f"사용량 갱신 완료 · 부품 {len(parsed_usage['items']):,}종")
+            st.success(f"사용량 갱신 완료 · 부품 {len(parsed_usage['items']):,}종", icon=":material/check_circle:")
         except Exception as e:
-            st.error(f"사용량 파일을 읽는 중 문제가 발생했습니다: {e}")
+            st.error(f"사용량 파일을 읽는 중 문제가 발생했습니다: {e}", icon=":material/error:")
 
 if usage and usage.get("weekRange"):
     wr = usage["weekRange"]
-    st.info(f"📈 사용량 데이터 기준: {wr['from'][0]}-{wr['from'][1]}주 ~ {wr['to'][0]}-{wr['to'][1]}주 ({wr['count']}주)")
+    st.info(f"사용량 데이터 기준: {wr['from'][0]}-{wr['from'][1]}주 ~ {wr['to'][0]}-{wr['to'][1]}주 ({wr['count']}주)", icon=":material/insights:")
 
 st.divider()
 
 if not data:
-    st.warning("아직 업로드된 재고 데이터가 없어요. 위에서 재고 엑셀을 업로드해주세요.")
+    st.warning("아직 업로드된 재고 데이터가 없어요. 위에서 재고 엑셀을 업로드해주세요.", icon=":material/upload_file:")
     st.stop()
 
 
@@ -588,15 +528,27 @@ def get_usage_for_code(code):
 # ---------------- 탭 ----------------
 
 tab_overview, tab_camps, tab_items, tab_rebalance, tab_usage_amount = st.tabs(
-    ["개요", "캠프별 현황", "품목 검색", "재분배 도우미", "월별 사용 금액"]
+    [
+        ":material/dashboard: 개요",
+        ":material/location_on: 캠프별 현황",
+        ":material/search: 품목 검색",
+        ":material/sync_alt: 재분배 도우미",
+        ":material/payments: 월별 사용 금액",
+    ]
 )
 
 with tab_overview:
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("총 품목 수", f"{len(data['items']):,}종")
-    k2.metric("총 재고 수량", f"{fmt_int(grand_qty)}개")
-    k3.metric("총 재고 금액", fmt_won(grand_amt))
-    k4.metric("운영 캠프 수", f"{len(data['campsOrder'])}곳", delta=(f"재고 0인 캠프 {zero_camps}곳" if zero_camps else None), delta_color="inverse")
+    k1.metric("총 품목 수", f"{len(data['items']):,}종", border=True)
+    k2.metric("총 재고 수량", f"{fmt_int(grand_qty)}개", border=True)
+    k3.metric("총 재고 금액", fmt_won(grand_amt), border=True)
+    k4.metric(
+        "운영 캠프 수",
+        f"{len(data['campsOrder'])}곳",
+        delta=(f"재고 0인 캠프 {zero_camps}곳" if zero_camps else None),
+        delta_color="inverse",
+        border=True,
+    )
 
     c1, c2 = st.columns(2)
     with c1:
@@ -612,7 +564,6 @@ with tab_camps:
     ascending = st.checkbox("오름차순", value=False)
     st.dataframe(
         camp_df.sort_values(sort_col, ascending=ascending),
-        use_container_width=True,
         hide_index=True,
         column_config={
             "재고 수량": st.column_config.NumberColumn(format="%d개"),
@@ -637,7 +588,7 @@ with tab_items:
                 for camp, (q, a) in sorted(it["x"].items(), key=lambda kv: -kv[1][0]):
                     avg = camp_usage.get(camp, {}).get("avg") if camp_usage else None
                     rows.append({"캠프": camp, "재고 수량": q, "주 평균 사용량": avg if avg is not None else "-"})
-                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(rows), hide_index=True)
 
 with tab_rebalance:
     st.caption("품목을 선택하면 캠프별 재고 편차를 확인할 수 있어요")
@@ -651,7 +602,7 @@ with tab_rebalance:
             picked_label = st.radio("검색 결과", list(options.keys()), index=0)
             selected = options[picked_label]
         else:
-            st.info("일치하는 품목이 없습니다.")
+            st.info("일치하는 품목이 없습니다.", icon=":material/search_off:")
 
     if selected:
         item_usage = get_usage_for_code(selected["c"])
@@ -698,7 +649,8 @@ with tab_rebalance:
                 suggested_transfer = {"from": top["캠프"], "to": shortages["캠프"].iloc[0], "qty": move_qty}
                 st.warning(
                     f"**{top['캠프']}**에 {fmt_int(top['재고 수량'])}개 보유 중인 반면, **{to_camps}**에는 재고가 없습니다. "
-                    f"약 {move_qty}개 이동을 검토해보세요. (최근 사용량 데이터를 반영한 제안)"
+                    f"약 {move_qty}개 이동을 검토해보세요. (최근 사용량 데이터를 반영한 제안)",
+                    icon=":material/lightbulb:",
                 )
         else:
             with_stock = df_rows[df_rows["재고 수량"] > 0]
@@ -710,10 +662,10 @@ with tab_rebalance:
                 suggested_transfer = {"from": top["캠프"], "to": empty["캠프"].iloc[0], "qty": move_qty}
                 st.warning(
                     f"**{top['캠프']}**에 {fmt_int(top['재고 수량'])}개 보유 중인 반면, **{to_camps}**에는 재고가 없습니다. "
-                    f"약 {move_qty}개 이동을 검토해보세요. (사용량 데이터가 없어 재고량만 기준으로 한 참고용 제안)"
+                    f"약 {move_qty}개 이동을 검토해보세요. (사용량 데이터가 없어 재고량만 기준으로 한 참고용 제안)",
+                    icon=":material/lightbulb:",
                 )
 
-        st.divider()
         st.subheader("캠프 간 재고 이관")
         st.caption("요청 → 승인(이동중) → 입고완료 순서로 처리돼요. 실제 재고 수량은 입고완료 시점에 보내는 캠프에서 빠지고 받는 캠프에 더해지며, 승인되면 그 전까지는 \"가용재고\"에서만 미리 제외되어 보입니다.")
 
@@ -738,14 +690,14 @@ with tab_rebalance:
                 )
             if st.form_submit_button("이관 요청"):
                 if not my_name.strip():
-                    st.error("내 이름을 먼저 입력해주세요.")
+                    st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
                 elif from_camp_sel == to_camp_sel:
-                    st.error("보내는 캠프와 받는 캠프가 같습니다.")
+                    st.error("보내는 캠프와 받는 캠프가 같습니다.", icon=":material/error:")
                 else:
                     create_transfer_request(
                         item_code, selected["n"], from_camp_sel, to_camp_sel, int(qty_sel), my_name.strip()
                     )
-                    st.success("이관 요청을 등록했습니다.")
+                    st.success("이관 요청을 등록했습니다.", icon=":material/send:")
                     st.rerun()
 
         req_df = list_transfer_requests(item_code)
@@ -756,11 +708,12 @@ with tab_rebalance:
         if not requested_rows.empty:
             st.markdown("**요청중**")
             for _, r in requested_rows.iterrows():
-                c1, c2, c3 = st.columns([5, 1, 1])
+                c0, c1, c2, c3 = st.columns([1, 4, 1, 1])
+                c0.badge("요청중", icon=":material/schedule:", color="orange")
                 c1.write(f"{r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · 요청자: {r['requested_by']}")
                 if c2.button("승인", key=f"approve_{r['id']}"):
                     if not my_name.strip():
-                        st.error("내 이름을 먼저 입력해주세요.")
+                        st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
                     else:
                         item = find_item_by_code(data, item_code)
                         current_qty = item["x"].get(r["from_camp"], [0, 0])[0]
@@ -773,15 +726,16 @@ with tab_rebalance:
                         if available < r["qty"]:
                             st.error(
                                 f"{r['from_camp']}의 가용재고가 부족합니다. "
-                                f"(가용 {available}개, 요청 {int(r['qty'])}개)"
+                                f"(가용 {available}개, 요청 {int(r['qty'])}개)",
+                                icon=":material/error:",
                             )
                         else:
                             approve_transfer_request(r["id"], my_name.strip())
-                            st.success("승인했습니다. 이동중 상태로 전환됩니다.")
+                            st.success("승인했습니다. 이동중 상태로 전환됩니다.", icon=":material/task_alt:")
                             st.rerun()
                 if c3.button("거절", key=f"reject_{r['id']}"):
                     if not my_name.strip():
-                        st.error("내 이름을 먼저 입력해주세요.")
+                        st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
                     else:
                         reject_transfer_request(r["id"], my_name.strip())
                         st.rerun()
@@ -789,32 +743,38 @@ with tab_rebalance:
         if not in_transit_rows.empty:
             st.markdown("**이동중**")
             for _, r in in_transit_rows.iterrows():
-                c1, c2 = st.columns([6, 1])
+                c0, c1, c2 = st.columns([1, 5, 1])
+                c0.badge("이동중", icon=":material/local_shipping:", color="blue")
                 c1.write(
                     f"{r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · 승인자: {r['approved_by']}"
                 )
                 if c2.button("입고완료", key=f"receive_{r['id']}"):
                     if not my_name.strip():
-                        st.error("내 이름을 먼저 입력해주세요.")
+                        st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
                     else:
                         item = find_item_by_code(data, item_code)
                         try:
                             moved_amt = deduct_camp_stock(item, r["from_camp"], int(r["qty"]))
                         except ValueError as e:
-                            st.error(str(e))
+                            st.error(str(e), icon=":material/error:")
                         else:
                             add_camp_stock(item, r["to_camp"], int(r["qty"]), moved_amt)
                             save_data("inventory", data)
                             complete_transfer_request(r["id"], my_name.strip(), moved_amt)
-                            st.success("입고 완료 처리했습니다.")
+                            st.success("입고 완료 처리했습니다.", icon=":material/inventory_2:")
                             st.rerun()
 
         if not done_rows.empty:
-            with st.expander(f"완료/거절 내역 ({len(done_rows)}건)"):
+            with st.expander(f"완료/거절 내역 ({len(done_rows)}건)", icon=":material/history:"):
                 for _, r in done_rows.iterrows():
-                    label = "입고완료" if r["status"] == "completed" else "거절"
-                    who = r["received_by"] if r["status"] == "completed" else r["approved_by"]
-                    st.caption(f"[{label}] {r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · {who}")
+                    is_done = r["status"] == "completed"
+                    who = r["received_by"] if is_done else r["approved_by"]
+                    dc0, dc1 = st.columns([1, 5])
+                    if is_done:
+                        dc0.badge("입고완료", icon=":material/check_circle:", color="green")
+                    else:
+                        dc0.badge("거절", icon=":material/cancel:", color="red")
+                    dc1.caption(f"{r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · {who}")
 
         if item_usage:
             weekly_totals = {}
@@ -828,7 +788,7 @@ with tab_rebalance:
                     {"주차": [f"{y}-{w}" for (y, w), _ in trend], "사용량": [v for _, v in trend]}
                 )
                 st.subheader("전체 캠프 합산 · 최근 12주 사용량 추이")
-                st.altair_chart(render_trend_chart(trend_df, "주차", "사용량"), use_container_width=True)
+                st.altair_chart(render_trend_chart(trend_df, "주차", "사용량"), width="stretch")
         else:
             st.caption("이 품목의 사용량 데이터가 아직 없습니다. (재고 수량만으로 비교합니다)")
 
@@ -841,7 +801,6 @@ with tab_rebalance:
         )
         st.dataframe(
             display_df,
-            use_container_width=True,
             hide_index=True,
             column_config={
                 "재고 수량": st.column_config.NumberColumn(format="%d개"),
@@ -853,7 +812,7 @@ with tab_rebalance:
 with tab_usage_amount:
     monthly_camp_amount = usage.get("monthlyCampAmount") if usage else None
     if not monthly_camp_amount:
-        st.info("사용량 엑셀을 업로드하면 캠프별·월별 사용 금액을 확인할 수 있어요. (JSON 업로드에는 이 데이터가 없어요)")
+        st.info("사용량 엑셀을 업로드하면 캠프별·월별 사용 금액을 확인할 수 있어요. (JSON 업로드에는 이 데이터가 없어요)", icon=":material/payments:")
     else:
         months = sorted(monthly_camp_amount.keys())
         amt_rows = [
@@ -868,18 +827,23 @@ with tab_usage_amount:
         monthly_avg = monthly_total.mean()
 
         k1, k2, k3 = st.columns(3)
-        k1.metric("총 사용 금액", fmt_won(grand_total))
-        k2.metric("월평균 사용 금액", fmt_won(monthly_avg))
-        k3.metric("데이터 기간", f"{months[0]} ~ {months[-1]} ({len(months)}개월)")
+        k1.metric(
+            "총 사용 금액",
+            fmt_won(grand_total),
+            border=True,
+            chart_data=monthly_total,
+            chart_type="area",
+        )
+        k2.metric("월평균 사용 금액", fmt_won(monthly_avg), border=True)
+        k3.metric("데이터 기간", f"{months[0]} ~ {months[-1]} ({len(months)}개월)", border=True)
         st.caption("가장 최근 달은 아직 마감 전이라 다른 달보다 금액이 낮게 보일 수 있어요.")
 
         st.subheader("전체 캠프 합산 · 월별 사용 금액 추이")
         overall_trend_df = monthly_total.reset_index()
         overall_trend_df.columns = ["월", "금액"]
-        st.altair_chart(render_trend_chart(overall_trend_df, "월", "금액"), use_container_width=True)
+        st.altair_chart(render_trend_chart(overall_trend_df, "월", "금액"), width="stretch")
         st.dataframe(
             overall_trend_df.sort_values("월", ascending=False),
-            use_container_width=True,
             hide_index=True,
             column_config={"금액": st.column_config.NumberColumn(format="₩%d")},
         )
@@ -896,14 +860,13 @@ with tab_usage_amount:
                 amt_df[amt_df["캠프"] == picked_camp].set_index("월")["금액"].reindex(months, fill_value=0)
             )
             cc1, cc2 = st.columns(2)
-            cc1.metric(f"{picked_camp} 총 사용 금액", fmt_won(camp_series.sum()))
-            cc2.metric(f"{picked_camp} 월평균 사용 금액", fmt_won(camp_series.mean()))
+            cc1.metric(f"{picked_camp} 총 사용 금액", fmt_won(camp_series.sum()), border=True)
+            cc2.metric(f"{picked_camp} 월평균 사용 금액", fmt_won(camp_series.mean()), border=True)
             camp_trend_df = camp_series.reset_index()
             camp_trend_df.columns = ["월", "금액"]
-            st.altair_chart(render_trend_chart(camp_trend_df, "월", "금액"), use_container_width=True)
+            st.altair_chart(render_trend_chart(camp_trend_df, "월", "금액"), width="stretch")
             st.dataframe(
                 camp_trend_df.sort_values("월", ascending=False),
-                use_container_width=True,
                 hide_index=True,
                 column_config={"금액": st.column_config.NumberColumn(format="₩%d")},
             )
@@ -932,10 +895,9 @@ with tab_usage_amount:
             .configure_view(strokeWidth=0)
             .configure(background="transparent")
         )
-        st.altair_chart(camp_bar, use_container_width=True)
+        st.altair_chart(camp_bar, width="stretch")
         st.dataframe(
             camp_totals,
-            use_container_width=True,
             hide_index=True,
             column_config={"총 사용 금액": st.column_config.NumberColumn(format="₩%d")},
         )
