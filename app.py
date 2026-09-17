@@ -118,7 +118,7 @@ def parse_usage_excel(file) -> dict:
     읽어 usage.json과 같은 구조로 변환."""
     df = pd.read_excel(file, header=1)
 
-    required = {"년도", "해당주", "고객명", "부품번호", "합계 : 수량"}
+    required = {"년도", "월", "해당주", "고객명", "부품번호", "합계 : 수량", "합계 : 부품계"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(
@@ -131,9 +131,11 @@ def parse_usage_excel(file) -> dict:
         raise ValueError("부품번호가 있는 사용량 데이터를 찾을 수 없습니다.")
 
     df["년도"] = pd.to_numeric(df["년도"], errors="coerce")
+    df["월"] = pd.to_numeric(df["월"], errors="coerce")
     df["해당주"] = pd.to_numeric(df["해당주"], errors="coerce")
-    df = df.dropna(subset=["년도", "해당주"])
+    df = df.dropna(subset=["년도", "월", "해당주"])
     df["년도"] = df["년도"].astype(int)
+    df["월"] = df["월"].astype(int)
     df["해당주"] = df["해당주"].astype(int)
 
     df["고객명"] = df["고객명"].astype(str).str.strip().map(lambda c: USAGE_CAMP_NAME_MAP.get(c, c))
@@ -143,6 +145,7 @@ def parse_usage_excel(file) -> dict:
 
     df["부품번호"] = df["부품번호"].astype(str).str.strip()
     df["합계 : 수량"] = pd.to_numeric(df["합계 : 수량"], errors="coerce").fillna(0)
+    df["합계 : 부품계"] = pd.to_numeric(df["합계 : 부품계"], errors="coerce").fillna(0)
 
     camp_week_count = (
         df[["고객명", "년도", "해당주"]].drop_duplicates().groupby("고객명").size().to_dict()
@@ -171,6 +174,13 @@ def parse_usage_excel(file) -> dict:
 
     all_weeks = sorted({(y, w) for (_, _, y, w) in agg.index})
 
+    # 월별 x 캠프별 사용 금액 집계 ("YYYY-MM" -> {캠프: 금액})
+    monthly_amt = df.groupby(["년도", "월", "고객명"])["합계 : 부품계"].sum()
+    monthly_camp_amount = {}
+    for (year, month, camp), amt in monthly_amt.items():
+        key = f"{int(year)}-{int(month):02d}"
+        monthly_camp_amount.setdefault(key, {})[camp] = round(float(amt), 2)
+
     return {
         "updatedAt": datetime.now().isoformat(),
         "campWeekCount": camp_week_count,
@@ -180,6 +190,7 @@ def parse_usage_excel(file) -> dict:
             "count": len(all_weeks),
         },
         "items": items,
+        "monthlyCampAmount": monthly_camp_amount,
     }
 
 
@@ -576,8 +587,8 @@ def get_usage_for_code(code):
 
 # ---------------- 탭 ----------------
 
-tab_overview, tab_camps, tab_items, tab_rebalance = st.tabs(
-    ["개요", "캠프별 현황", "품목 검색", "재분배 도우미"]
+tab_overview, tab_camps, tab_items, tab_rebalance, tab_usage_amount = st.tabs(
+    ["개요", "캠프별 현황", "품목 검색", "재분배 도우미", "월별 사용 금액"]
 )
 
 with tab_overview:
@@ -837,6 +848,96 @@ with tab_rebalance:
                 "가용재고": st.column_config.NumberColumn(format="%d개"),
                 "이동중재고": st.column_config.NumberColumn(format="%d개"),
             },
+        )
+
+with tab_usage_amount:
+    monthly_camp_amount = usage.get("monthlyCampAmount") if usage else None
+    if not monthly_camp_amount:
+        st.info("사용량 엑셀을 업로드하면 캠프별·월별 사용 금액을 확인할 수 있어요. (JSON 업로드에는 이 데이터가 없어요)")
+    else:
+        months = sorted(monthly_camp_amount.keys())
+        amt_rows = [
+            {"월": m, "캠프": camp, "금액": amt}
+            for m in months
+            for camp, amt in monthly_camp_amount[m].items()
+        ]
+        amt_df = pd.DataFrame(amt_rows)
+
+        monthly_total = amt_df.groupby("월")["금액"].sum().reindex(months, fill_value=0)
+        grand_total = monthly_total.sum()
+        monthly_avg = monthly_total.mean()
+
+        k1, k2, k3 = st.columns(3)
+        k1.metric("총 사용 금액", fmt_won(grand_total))
+        k2.metric("월평균 사용 금액", fmt_won(monthly_avg))
+        k3.metric("데이터 기간", f"{months[0]} ~ {months[-1]} ({len(months)}개월)")
+        st.caption("가장 최근 달은 아직 마감 전이라 다른 달보다 금액이 낮게 보일 수 있어요.")
+
+        st.subheader("전체 캠프 합산 · 월별 사용 금액 추이")
+        overall_trend_df = monthly_total.reset_index()
+        overall_trend_df.columns = ["월", "금액"]
+        st.altair_chart(render_trend_chart(overall_trend_df, "월", "금액"), use_container_width=True)
+        st.dataframe(
+            overall_trend_df.sort_values("월", ascending=False),
+            use_container_width=True,
+            hide_index=True,
+            column_config={"금액": st.column_config.NumberColumn(format="₩%d")},
+        )
+
+        camp_totals = (
+            amt_df.groupby("캠프")["금액"].sum().sort_values(ascending=False).reset_index()
+        )
+        camp_totals.columns = ["캠프", "총 사용 금액"]
+
+        st.subheader("캠프별 사용 금액")
+        picked_camp = st.selectbox("캠프 선택", ["전체 캠프 합산"] + camp_totals["캠프"].tolist())
+        if picked_camp != "전체 캠프 합산":
+            camp_series = (
+                amt_df[amt_df["캠프"] == picked_camp].set_index("월")["금액"].reindex(months, fill_value=0)
+            )
+            cc1, cc2 = st.columns(2)
+            cc1.metric(f"{picked_camp} 총 사용 금액", fmt_won(camp_series.sum()))
+            cc2.metric(f"{picked_camp} 월평균 사용 금액", fmt_won(camp_series.mean()))
+            camp_trend_df = camp_series.reset_index()
+            camp_trend_df.columns = ["월", "금액"]
+            st.altair_chart(render_trend_chart(camp_trend_df, "월", "금액"), use_container_width=True)
+            st.dataframe(
+                camp_trend_df.sort_values("월", ascending=False),
+                use_container_width=True,
+                hide_index=True,
+                column_config={"금액": st.column_config.NumberColumn(format="₩%d")},
+            )
+
+        st.subheader("캠프별 총 사용 금액 순위 (전체 기간 합계)")
+        camp_bar = (
+            alt.Chart(camp_totals)
+            .mark_bar(color=ACCENT, cornerRadiusTopRight=3, cornerRadiusBottomRight=3, height=14)
+            .encode(
+                y=alt.Y(
+                    "캠프:N",
+                    sort="-x",
+                    title=None,
+                    axis=alt.Axis(labelColor=CHART_MUTED, labelFontSize=11, domain=False, ticks=False),
+                ),
+                x=alt.X(
+                    "총 사용 금액:Q",
+                    title=None,
+                    axis=alt.Axis(
+                        labelColor=CHART_MUTED, labelFontSize=11, gridColor=CHART_GRID, domain=False, ticks=False
+                    ),
+                ),
+                tooltip=[alt.Tooltip("캠프:N"), alt.Tooltip("총 사용 금액:Q", format=",.0f")],
+            )
+            .properties(height=max(220, len(camp_totals) * 20))
+            .configure_view(strokeWidth=0)
+            .configure(background="transparent")
+        )
+        st.altair_chart(camp_bar, use_container_width=True)
+        st.dataframe(
+            camp_totals,
+            use_container_width=True,
+            hide_index=True,
+            column_config={"총 사용 금액": st.column_config.NumberColumn(format="₩%d")},
         )
 
 st.divider()
