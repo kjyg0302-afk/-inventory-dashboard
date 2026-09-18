@@ -138,6 +138,13 @@ def parse_usage_excel(file) -> dict:
             .to_dict()
         )
 
+    # 캠프별 주 평균 사용 금액 (전체 기간 총 사용 금액 ÷ 그 캠프의 실제 데이터 존재 주 수)
+    camp_total_amt = df.groupby("고객명")["합계 : 부품계"].sum()
+    camp_weekly_amount = {
+        camp: round(float(total) / (camp_week_count.get(camp, 1) or 1), 2)
+        for camp, total in camp_total_amt.items()
+    }
+
     return {
         "updatedAt": datetime.now().isoformat(),
         "campWeekCount": camp_week_count,
@@ -150,6 +157,7 @@ def parse_usage_excel(file) -> dict:
         "monthlyCampAmount": monthly_camp_amount,
         "monthlySkuAmount": monthly_sku_amount,
         "skuNames": sku_names,
+        "campWeeklyAmount": camp_weekly_amount,
     }
 
 
@@ -700,14 +708,31 @@ with tab_overview:
         st.bar_chart(top8.set_index("캠프")["재고 금액"])
 
 with tab_camps:
-    sort_col = st.selectbox("정렬 기준", ["재고 금액", "재고 수량", "캠프", "팀"], index=0)
+    camp_weekly_amount = (usage.get("campWeeklyAmount") if usage else None) or {}
+    camp_full_df = camp_df.copy()
+    camp_full_df["주 사용 금액"] = camp_full_df["캠프"].map(camp_weekly_amount)
+    camp_full_df["재고 보유(주)"] = camp_full_df.apply(
+        lambda r: round(r["재고 금액"] / r["주 사용 금액"], 1) if r["주 사용 금액"] else None, axis=1
+    )
+
+    sort_col = st.selectbox(
+        "정렬 기준", ["재고 금액", "재고 수량", "캠프", "팀", "재고 보유(주)"], index=0
+    )
     ascending = st.checkbox("오름차순", value=False)
+    camp_full_df = camp_full_df.sort_values(sort_col, ascending=ascending, na_position="last")
+
+    st.caption(
+        "재고 보유(주)는 캠프 사용량 엑셀 기준 주 평균 사용 금액 대비, 현재 재고 금액이 "
+        "몇 주치인지를 나타내요. 사용량 데이터가 없으면 빈 칸으로 표시돼요."
+    )
     st.dataframe(
-        camp_df.sort_values(sort_col, ascending=ascending),
+        camp_full_df,
         hide_index=True,
         column_config={
             "재고 수량": st.column_config.NumberColumn(format="%,d개"),
             "재고 금액": st.column_config.NumberColumn(format="₩%,d"),
+            "주 사용 금액": st.column_config.NumberColumn(format="₩%,d"),
+            "재고 보유(주)": st.column_config.NumberColumn(format="%.1f주"),
         },
     )
 
