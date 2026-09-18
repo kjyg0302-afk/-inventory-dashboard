@@ -1,5 +1,5 @@
 """
-캠프 재고 현황판 (Streamlit)
+지바이크 SCM 대시보드 (Streamlit)
 - 태블로에서 받은 재고 엑셀(피벗 형식)과, scm_data.db에서 export_weekly_usage.py로
   뽑은 주단위 사용량 JSON(또는 사용량 엑셀)을 업로드하면 대시보드가 채워집니다.
 - 업로드한 데이터는 Supabase(Postgres) DB에 저장되어, 다시 접속하는 모든 사람에게
@@ -17,7 +17,7 @@ import requests
 import streamlit as st
 from sqlalchemy import text
 
-st.set_page_config(page_title="캠프 재고 현황판", layout="wide")
+st.set_page_config(page_title="지바이크 SCM 대시보드", layout="wide")
 
 st.markdown(
     """
@@ -548,12 +548,19 @@ col_title, col_upload1, col_upload2 = st.columns([3, 1, 1])
 with col_title:
     st.markdown(
         """
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:2px;">
-            <div style="width:40px;height:40px;border-radius:10px;
-                        background:linear-gradient(135deg, rgba(91,141,239,0.28), rgba(91,141,239,0.06));
-                        border:1px solid rgba(91,141,239,0.35);display:flex;align-items:center;
-                        justify-content:center;font-size:19px;">📦</div>
-            <div style="font-size:21px;font-weight:700;letter-spacing:-0.01em;">캠프 재고 현황판</div>
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:2px;">
+            <div style="width:42px;height:42px;border-radius:50%;flex-shrink:0;
+                        background:linear-gradient(135deg, #6FA0FF, #4A6FE0);
+                        box-shadow:0 4px 16px rgba(74,111,224,0.45);
+                        display:flex;align-items:center;justify-content:center;">
+                <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="white"
+                     stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                    <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                    <line x1="12" y1="22.08" x2="12" y2="12"/>
+                </svg>
+            </div>
+            <div style="font-size:21px;font-weight:700;letter-spacing:-0.01em;">지바이크 SCM 대시보드</div>
         </div>
         """,
         unsafe_allow_html=True,
