@@ -121,6 +121,23 @@ def parse_usage_excel(file) -> dict:
         key = f"{int(year)}-{int(month):02d}"
         monthly_camp_amount.setdefault(key, {})[camp] = round(float(amt), 2)
 
+    # 월별 x 부품번호(SKU)별 사용 금액 집계 ("YYYY-MM" -> {부품번호: 금액})
+    monthly_sku_amt = df.groupby(["년도", "월", "부품번호"])["합계 : 부품계"].sum()
+    monthly_sku_amount = {}
+    for (year, month, sku), amt in monthly_sku_amt.items():
+        key = f"{int(year)}-{int(month):02d}"
+        monthly_sku_amount.setdefault(key, {})[sku] = round(float(amt), 2)
+
+    # 부품번호 -> 품명 (가장 최근 값 사용)
+    sku_names = {}
+    if "부품" in df.columns:
+        sku_names = (
+            df.dropna(subset=["부품"])
+            .groupby("부품번호")["부품"]
+            .last()
+            .to_dict()
+        )
+
     return {
         "updatedAt": datetime.now().isoformat(),
         "campWeekCount": camp_week_count,
@@ -131,6 +148,8 @@ def parse_usage_excel(file) -> dict:
         },
         "items": items,
         "monthlyCampAmount": monthly_camp_amount,
+        "monthlySkuAmount": monthly_sku_amount,
+        "skuNames": sku_names,
     }
 
 
@@ -618,6 +637,25 @@ def get_usage_for_code(code):
     return usage["items"].get(str(code).strip())
 
 
+def weekly_usage_rate(code):
+    """해당 SKU의 전체 캠프 합산 주 평균 사용량 (사용량 데이터 없으면 None)."""
+    item_usage = get_usage_for_code(code)
+    if not item_usage:
+        return None
+    total_avg = sum(u.get("avg", 0) for u in item_usage.values())
+    return total_avg if total_avg > 0 else None
+
+
+def estimate_depletion(qty, code):
+    """qty(재고 수량)와 SKU의 주 평균 사용량으로 소진까지 남은 주 수와 예상 소진일을 계산."""
+    rate = weekly_usage_rate(code)
+    if not rate:
+        return None, None
+    weeks = qty / rate
+    depletion_date = (datetime.now() + timedelta(weeks=weeks)).date()
+    return round(weeks, 1), depletion_date
+
+
 # ---------------- 탭 ----------------
 
 tab_overview, tab_camps, tab_items, tab_rebalance, tab_usage_amount, tab_warehouse, tab_total = st.tabs(
@@ -943,59 +981,161 @@ with tab_usage_amount:
             column_config={"금액": st.column_config.NumberColumn(format="₩%,d")},
         )
 
-        camp_totals = (
-            amt_df.groupby("캠프")["금액"].sum().sort_values(ascending=False).reset_index()
-        )
-        camp_totals.columns = ["캠프", "총 사용 금액"]
+        sub_camp, sub_sku = st.tabs([":material/location_on: 캠프별 사용 금액", ":material/settings: 부품별 사용 금액"])
 
-        st.subheader("캠프별 사용 금액")
-        picked_camp = st.selectbox("캠프 선택", ["전체 캠프 합산"] + camp_totals["캠프"].tolist())
-        if picked_camp != "전체 캠프 합산":
-            camp_series = (
-                amt_df[amt_df["캠프"] == picked_camp].set_index("월")["금액"].reindex(months, fill_value=0)
+        with sub_camp:
+            camp_totals = (
+                amt_df.groupby("캠프")["금액"].sum().sort_values(ascending=False).reset_index()
             )
-            cc1, cc2 = st.columns(2)
-            cc1.metric(f"{picked_camp} 총 사용 금액", fmt_won(camp_series.sum()), border=True)
-            cc2.metric(f"{picked_camp} 월평균 사용 금액", fmt_won(camp_series.mean()), border=True)
-            camp_trend_df = camp_series.reset_index()
-            camp_trend_df.columns = ["월", "금액"]
-            st.altair_chart(render_trend_chart(camp_trend_df, "월", "금액"), width="stretch")
-            st.dataframe(
-                camp_trend_df.sort_values("월", ascending=False),
-                hide_index=True,
-                column_config={"금액": st.column_config.NumberColumn(format="₩%,d")},
-            )
+            camp_totals.columns = ["캠프", "총 사용 금액"]
 
-        st.subheader("캠프별 총 사용 금액 순위 (전체 기간 합계)")
-        camp_bar = (
-            alt.Chart(camp_totals)
-            .mark_bar(color=ACCENT, cornerRadiusTopRight=3, cornerRadiusBottomRight=3, height=14)
-            .encode(
-                y=alt.Y(
-                    "캠프:N",
-                    sort="-x",
-                    title=None,
-                    axis=alt.Axis(labelColor=CHART_MUTED, labelFontSize=11, domain=False, ticks=False),
-                ),
-                x=alt.X(
-                    "총 사용 금액:Q",
-                    title=None,
-                    axis=alt.Axis(
-                        labelColor=CHART_MUTED, labelFontSize=11, gridColor=CHART_GRID, domain=False, ticks=False
+            picked_camp = st.selectbox("캠프 선택", ["전체 캠프 합산"] + camp_totals["캠프"].tolist())
+            if picked_camp != "전체 캠프 합산":
+                camp_series = (
+                    amt_df[amt_df["캠프"] == picked_camp].set_index("월")["금액"].reindex(months, fill_value=0)
+                )
+                cc1, cc2 = st.columns(2)
+                cc1.metric(f"{picked_camp} 총 사용 금액", fmt_won(camp_series.sum()), border=True)
+                cc2.metric(f"{picked_camp} 월평균 사용 금액", fmt_won(camp_series.mean()), border=True)
+                camp_trend_df = camp_series.reset_index()
+                camp_trend_df.columns = ["월", "금액"]
+                st.altair_chart(render_trend_chart(camp_trend_df, "월", "금액"), width="stretch")
+                st.dataframe(
+                    camp_trend_df.sort_values("월", ascending=False),
+                    hide_index=True,
+                    column_config={"금액": st.column_config.NumberColumn(format="₩%,d")},
+                )
+
+            st.subheader("캠프별 총 사용 금액 순위 (전체 기간 합계)")
+            camp_bar = (
+                alt.Chart(camp_totals)
+                .mark_bar(color=ACCENT, cornerRadiusTopRight=3, cornerRadiusBottomRight=3, height=14)
+                .encode(
+                    y=alt.Y(
+                        "캠프:N",
+                        sort="-x",
+                        title=None,
+                        axis=alt.Axis(labelColor=CHART_MUTED, labelFontSize=11, domain=False, ticks=False),
                     ),
-                ),
-                tooltip=[alt.Tooltip("캠프:N"), alt.Tooltip("총 사용 금액:Q", format=",.0f")],
+                    x=alt.X(
+                        "총 사용 금액:Q",
+                        title=None,
+                        axis=alt.Axis(
+                            labelColor=CHART_MUTED, labelFontSize=11, gridColor=CHART_GRID, domain=False, ticks=False
+                        ),
+                    ),
+                    tooltip=[alt.Tooltip("캠프:N"), alt.Tooltip("총 사용 금액:Q", format=",.0f")],
+                )
+                .properties(height=max(220, len(camp_totals) * 20))
+                .configure_view(strokeWidth=0)
+                .configure(background="transparent")
             )
-            .properties(height=max(220, len(camp_totals) * 20))
-            .configure_view(strokeWidth=0)
-            .configure(background="transparent")
-        )
-        st.altair_chart(camp_bar, width="stretch")
-        st.dataframe(
-            camp_totals,
-            hide_index=True,
-            column_config={"총 사용 금액": st.column_config.NumberColumn(format="₩%,d")},
-        )
+            st.altair_chart(camp_bar, width="stretch")
+            st.dataframe(
+                camp_totals,
+                hide_index=True,
+                column_config={"총 사용 금액": st.column_config.NumberColumn(format="₩%,d")},
+            )
+
+        with sub_sku:
+            monthly_sku_amount = usage.get("monthlySkuAmount")
+            sku_names = usage.get("skuNames") or {}
+            if not monthly_sku_amount:
+                st.caption("이 사용량 데이터에는 부품별 금액 정보가 없어요. 사용량 엑셀을 다시 업로드하면 채워집니다.")
+            else:
+                sku_amt_rows = [
+                    {"SKU": sku, "월": m, "금액": amt}
+                    for m in months
+                    for sku, amt in monthly_sku_amount.get(m, {}).items()
+                ]
+                sku_amt_df = pd.DataFrame(sku_amt_rows)
+
+                sku_totals = sku_amt_df.groupby("SKU")["금액"].sum().sort_values(ascending=False).reset_index()
+                sku_totals.columns = ["SKU", "총 사용 금액"]
+                sku_totals["품명"] = sku_totals["SKU"].map(sku_names).fillna("-")
+                # 품명이 같은 부품이 섞여 있을 수 있어, 그래프/표 표시용으로는 SKU를 덧붙여 구분한다.
+                sku_totals["표시명"] = sku_totals["품명"] + " (" + sku_totals["SKU"] + ")"
+                sku_totals = sku_totals[["표시명", "품명", "SKU", "총 사용 금액"]]
+
+                sku_query = st.text_input("SKU 또는 품명으로 검색해서 월별 추이 보기", "", key="usage_sku_query")
+                if sku_query.strip():
+                    q = sku_query.strip().lower()
+                    candidates = [
+                        s for s in sku_totals["SKU"] if q in s.lower() or q in str(sku_names.get(s, "")).lower()
+                    ][:8]
+                    if candidates:
+                        labels = {f"{s} · {sku_names.get(s, '-')}": s for s in candidates}
+                        picked_label = st.radio("검색 결과", list(labels.keys()), key="usage_sku_radio")
+                        picked_sku = labels[picked_label]
+                        sku_series = (
+                            sku_amt_df[sku_amt_df["SKU"] == picked_sku]
+                            .set_index("월")["금액"]
+                            .reindex(months, fill_value=0)
+                        )
+                        sc1, sc2 = st.columns(2)
+                        sc1.metric(f"{picked_label} 총 사용 금액", fmt_won(sku_series.sum()), border=True)
+                        sc2.metric(f"{picked_label} 월평균 사용 금액", fmt_won(sku_series.mean()), border=True)
+                        sku_trend_df = sku_series.reset_index()
+                        sku_trend_df.columns = ["월", "금액"]
+                        st.altair_chart(render_trend_chart(sku_trend_df, "월", "금액"), width="stretch")
+                        st.dataframe(
+                            sku_trend_df.sort_values("월", ascending=False),
+                            hide_index=True,
+                            column_config={"금액": st.column_config.NumberColumn(format="₩%,d")},
+                        )
+                    else:
+                        st.caption("일치하는 부품이 없습니다.")
+
+                st.subheader("부품별 총 사용 금액 순위 (전체 기간 합계)")
+                top_n = 25
+                sku_bar_df = sku_totals.head(top_n)
+                sku_bar = (
+                    alt.Chart(sku_bar_df)
+                    .mark_bar(color=ACCENT, cornerRadiusTopRight=3, cornerRadiusBottomRight=3, height=14)
+                    .encode(
+                        y=alt.Y(
+                            "표시명:N",
+                            sort="-x",
+                            title=None,
+                            axis=alt.Axis(labelColor=CHART_MUTED, labelFontSize=11, domain=False, ticks=False),
+                        ),
+                        x=alt.X(
+                            "총 사용 금액:Q",
+                            title=None,
+                            axis=alt.Axis(
+                                labelColor=CHART_MUTED,
+                                labelFontSize=11,
+                                gridColor=CHART_GRID,
+                                domain=False,
+                                ticks=False,
+                            ),
+                        ),
+                        tooltip=[
+                            alt.Tooltip("품명:N"),
+                            alt.Tooltip("SKU:N"),
+                            alt.Tooltip("총 사용 금액:Q", format=",.0f"),
+                        ],
+                    )
+                    .properties(height=max(220, len(sku_bar_df) * 20))
+                    .configure_view(strokeWidth=0)
+                    .configure(background="transparent")
+                )
+                st.altair_chart(sku_bar, width="stretch")
+                st.caption(f"상위 {top_n}개만 그래프로 표시했어요 (전체 {len(sku_totals):,}개 부품은 아래 표에서 검색 가능).")
+
+                sku_table_search = st.text_input("SKU 또는 품명으로 검색 (표)", "", key="usage_sku_table_search")
+                sku_table_df = sku_totals
+                if sku_table_search.strip():
+                    q = sku_table_search.strip().lower()
+                    sku_table_df = sku_table_df[
+                        sku_table_df["SKU"].str.lower().str.contains(q, regex=False)
+                        | sku_table_df["품명"].str.lower().str.contains(q, regex=False)
+                    ]
+                st.dataframe(
+                    sku_table_df[["품명", "SKU", "총 사용 금액"]],
+                    hide_index=True,
+                    column_config={"총 사용 금액": st.column_config.NumberColumn(format="₩%,d")},
+                )
 
 with tab_total:
     if not get_boxhero_token():
@@ -1079,14 +1219,21 @@ with tab_total:
                 wh_price = float(wh_it.get("price") or 0) if wh_it else 0
                 wh_a = wh_q * wh_price
                 name = camp_it["n"] if camp_it else wh_it["name"]
+                total_q = wh_q + camp_q
+                # 사용량 조회는 원래 표기(대소문자)를 써야 정확히 매칭된다 (join용 sku는 대문자로 통일돼있음).
+                orig_code = camp_it["c"] if camp_it else wh_it["sku"]
+                weeks, depletion_date = estimate_depletion(total_q, orig_code)
                 compare_rows.append(
                     {
                         "SKU": sku,
                         "품명": name,
                         "물류창고 수량": wh_q,
                         "캠프 재고 수량": camp_q,
-                        "합계 수량": wh_q + camp_q,
+                        "합계 수량": total_q,
                         "재고 금액": wh_a + camp_a,
+                        "주 사용량": weekly_usage_rate(orig_code),
+                        "소진 예상(주)": weeks,
+                        "예상 소진일": depletion_date.isoformat() if depletion_date else None,
                     }
                 )
             compare_df = pd.DataFrame(compare_rows).sort_values("재고 금액", ascending=False)
@@ -1098,9 +1245,20 @@ with tab_total:
                     compare_df["SKU"].str.lower().str.contains(q, regex=False)
                     | compare_df["품명"].str.lower().str.contains(q, regex=False)
                 ]
-            st.caption(f"{len(compare_df):,}개 SKU (창고·캠프 어느 한쪽에라도 있는 품목 전체)")
+            st.caption(
+                f"{len(compare_df):,}개 SKU (창고·캠프 어느 한쪽에라도 있는 품목 전체). "
+                "주 사용량/예상 소진일은 캠프 사용량 엑셀 기준(전체 캠프 합산)이에요."
+            )
+            display_compare_df = compare_df.copy()
+            display_compare_df["주 사용량"] = display_compare_df["주 사용량"].apply(
+                lambda v: "-" if pd.isna(v) else f"{v:g}개/주"
+            )
+            display_compare_df["소진 예상(주)"] = display_compare_df["소진 예상(주)"].apply(
+                lambda v: "-" if pd.isna(v) else f"{v:g}주"
+            )
+            display_compare_df["예상 소진일"] = display_compare_df["예상 소진일"].fillna("-")
             st.dataframe(
-                compare_df,
+                display_compare_df,
                 hide_index=True,
                 column_config={
                     "물류창고 수량": st.column_config.NumberColumn(format="%,d개"),
@@ -1139,27 +1297,43 @@ with tab_warehouse:
             )
 
             st.subheader("품목별 창고 재고")
+            st.caption("주 사용량/예상 소진일은 캠프 사용량 엑셀 기준(전체 캠프 합산)이라, 사용량 데이터가 없는 SKU는 \"-\"로 표시돼요.")
             wh_search = st.text_input("품목명 또는 SKU로 검색", "", key="warehouse_search")
-            wh_df = pd.DataFrame(
-                [
+            wh_rows = []
+            for it in wh_items:
+                sku = it["sku"]
+                qty = it.get("quantity", 0)
+                price = float(it.get("price") or 0)
+                weeks, depletion_date = estimate_depletion(qty, sku)
+                wh_rows.append(
                     {
-                        "SKU": it["sku"],
+                        "SKU": sku,
                         "품목명": it["name"],
-                        "재고 수량": it.get("quantity", 0),
-                        "단가": float(it.get("price") or 0),
-                        "재고 금액": it.get("quantity", 0) * float(it.get("price") or 0),
+                        "재고 수량": qty,
+                        "단가": price,
+                        "재고 금액": qty * price,
+                        "주 사용량": weekly_usage_rate(sku),
+                        "소진 예상(주)": weeks,
+                        "예상 소진일": depletion_date.isoformat() if depletion_date else None,
                     }
-                    for it in wh_items
-                ]
-            ).sort_values("재고 금액", ascending=False)
+                )
+            wh_df = pd.DataFrame(wh_rows).sort_values("재고 금액", ascending=False)
             if wh_search.strip():
                 q = wh_search.strip().lower()
                 wh_df = wh_df[
                     wh_df["품목명"].str.lower().str.contains(q, regex=False)
                     | wh_df["SKU"].str.lower().str.contains(q, regex=False)
                 ]
+            display_wh_df = wh_df.copy()
+            display_wh_df["주 사용량"] = display_wh_df["주 사용량"].apply(
+                lambda v: "-" if pd.isna(v) else f"{v:g}개/주"
+            )
+            display_wh_df["소진 예상(주)"] = display_wh_df["소진 예상(주)"].apply(
+                lambda v: "-" if pd.isna(v) else f"{v:g}주"
+            )
+            display_wh_df["예상 소진일"] = display_wh_df["예상 소진일"].fillna("-")
             st.dataframe(
-                wh_df,
+                display_wh_df,
                 hide_index=True,
                 column_config={
                     "재고 수량": st.column_config.NumberColumn(format="%,d개"),
