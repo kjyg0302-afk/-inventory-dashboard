@@ -162,6 +162,17 @@ def parse_usage_excel(file) -> dict:
         for sku, total in sku_total_amt.items()
     }
 
+    # 로우 단위 사실 테이블 (usage_facts DB 테이블용) — 부품×캠프×연도×월×주 단위 수량/금액.
+    # usage.json 요약과 달리 미리 정해둔 모양이 없어, SQL로 자유롭게 재집계하거나 예측에 바로 쓸 수 있다.
+    facts_df = df.groupby(["부품번호", "고객명", "년도", "월", "해당주"], as_index=False).agg(
+        qty=("합계 : 수량", "sum"), amt=("합계 : 부품계", "sum")
+    )
+    facts_df["item_name"] = facts_df["부품번호"].map(sku_names)
+    facts_df = facts_df.rename(
+        columns={"부품번호": "item_code", "고객명": "camp", "년도": "year", "월": "month", "해당주": "week"}
+    )
+    facts_df = facts_df[["year", "month", "week", "camp", "item_code", "item_name", "qty", "amt"]]
+
     return {
         "updatedAt": datetime.now().isoformat(),
         "campWeekCount": camp_week_count,
@@ -177,6 +188,7 @@ def parse_usage_excel(file) -> dict:
         "campWeeklyAmount": camp_weekly_amount,
         "monthlyItemCampQty": monthly_item_camp_qty,
         "skuWeeklyAmount": sku_weekly_amount,
+        "facts": facts_df,
     }
 
 
@@ -274,6 +286,15 @@ def save_data(key, obj):
             {"key": key, "data": json.dumps(obj, ensure_ascii=False)},
         )
         session.commit()
+
+
+def save_usage_facts(facts_df):
+    """usage_facts 테이블을 사용량 엑셀 기준으로 통째로 새로 채운다 (전체 교체)."""
+    conn = get_db_connection()
+    engine = conn.session.get_bind()
+    with engine.begin() as connection:
+        connection.execute(text("truncate table usage_facts"))
+        facts_df.to_sql("usage_facts", con=connection, if_exists="append", index=False, method="multi", chunksize=1000)
 
 
 def list_transfer_requests(item_code):
@@ -745,6 +766,8 @@ with col_upload2:
                         raise ValueError("사용량 JSON 형식이 올바르지 않습니다.")
                 else:
                     parsed_usage = parse_usage_excel(usage_file)
+                    facts_df = parsed_usage.pop("facts")
+                    save_usage_facts(facts_df)
                 save_data("usage", parsed_usage)
             st.session_state.usage = parsed_usage
             usage = parsed_usage

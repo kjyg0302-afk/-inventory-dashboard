@@ -61,3 +61,23 @@ create table if not exists warehouse_orders (
 
 create index if not exists idx_warehouse_orders_item on warehouse_orders (item_code);
 create index if not exists idx_warehouse_orders_status on warehouse_orders (status);
+
+-- 사용량 로우 데이터(관계형). 사용량 엑셀을 업로드할 때마다 전체를 새로 채운다.
+-- usage 요약 JSON(app_data)이 미리 정해둔 모양(월별/주별 등)으로만 볼 수 있는 것과 달리,
+-- 이 테이블은 SQL로 어떤 기준으로든 자유롭게 집계할 수 있고, 예측(forecast) 등에도 바로 쓸 수 있다.
+create table if not exists usage_facts (
+    id bigserial primary key,
+    year integer not null,
+    month integer not null,
+    week integer not null,
+    camp text not null,
+    item_code text not null,
+    item_name text,
+    qty numeric not null default 0,
+    amt numeric not null default 0
+);
+
+create index if not exists idx_usage_facts_item on usage_facts (item_code);
+create index if not exists idx_usage_facts_camp on usage_facts (camp);
+create index if not exists idx_usage_facts_year_month on usage_facts (year, month);
+create index if not exists idx_usage_facts_year_week on usage_facts (year, week);
