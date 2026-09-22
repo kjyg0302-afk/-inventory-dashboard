@@ -103,3 +103,31 @@ create table if not exists demand_forecasts (
 create index if not exists idx_demand_forecasts_camp_month
     on demand_forecasts (camp, forecast_year, forecast_month);
 create index if not exists idx_demand_forecasts_item on demand_forecasts (item_code);
+
+-- 재고 금액 주단위 누적 현황 (SKU 단위). 창고 요약 스냅샷(warehouse_snapshots)과 달리 SKU별
+-- 수량과 그 시점 단가를 따로 남겨서, 나중에 판매가가 바뀌어도 qty에 원하는 기준의 단가를
+-- 다시 곱해 동일한 기준으로 재고 금액을 재계산할 수 있게 한다.
+-- ISO 연도/주차(year, week) 단위로 한 묶음씩 누적된다 (예: 2026-W38 재고현황 800행,
+-- 2026-W39 재고현황 805행, ...). 같은 주 안에서 여러 번 갱신되면 그 주의 행을 덮어쓸 뿐,
+-- 주가 바뀌면 새 행 묶음이 추가되고 지난 주들은 그대로 남는다.
+-- source: 'camp' (캠프별, camp 컬럼에 캠프명) / 'warehouse' (물류창고, camp = '').
+create table if not exists inventory_value_snapshots (
+    id bigserial primary key,
+    year integer not null,
+    week integer not null,          -- ISO 주차 (1~53)
+    period_label text not null,     -- 표시용, 예: '2026-W38'
+    snapshot_date date not null,    -- 그 주 안에서 마지막으로 갱신된 날짜 (참고용)
+    source text not null,
+    camp text not null default '',
+    item_code text not null,
+    item_name text,
+    qty numeric not null default 0,
+    unit_price numeric,
+    amt numeric not null default 0,
+    created_at timestamptz not null default now(),
+    unique (year, week, source, camp, item_code)
+);
+
+create index if not exists idx_inv_value_snap_period on inventory_value_snapshots (year, week);
+create index if not exists idx_inv_value_snap_item on inventory_value_snapshots (item_code);
+create index if not exists idx_inv_value_snap_source on inventory_value_snapshots (source, year, week);

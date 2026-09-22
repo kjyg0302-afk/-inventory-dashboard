@@ -527,6 +527,100 @@ def load_warehouse_snapshots():
     return conn.query("select * from warehouse_snapshots order by snapshot_date", ttl=60)
 
 
+def current_inventory_period():
+    """(ISO 연도, ISO 주차, 'YYYY-Www' 표시용 라벨)을 반환."""
+    iso_year, iso_week, _ = datetime.now().isocalendar()
+    return iso_year, iso_week, f"{iso_year}-W{iso_week:02d}"
+
+
+def save_inventory_value_snapshot(source, rows):
+    """rows: [{"camp","item_code","item_name","qty","unit_price","amt"}, ...]로 이번 주(ISO 연도+주차)
+    현황을 채운다 (이번 주 + 해당 source의 기존 행만 지우고 새로 append — 지난 주들의 누적 이력은
+    그대로 남는다). 같은 주 안에서 여러 번 호출되면 그 주 행만 최신 값으로 덮어쓰고, 주가 바뀌면
+    새 행 묶음이 추가된다 (예: 2026-W38 재고현황 800행, 2026-W39 재고현황 805행, ...).
+    qty와 그 시점 단가(unit_price)를 따로 남겨서, 나중에 단가가 바뀌어도 qty에 원하는 기준
+    단가를 곱해 같은 기준으로 재고 금액을 다시 계산할 수 있다.
+    수천 건 단위라 upsert보다 delete+bulk append가 훨씬 빠르다."""
+    if not rows:
+        return
+    conn = get_db_connection()
+    year, week, label = current_inventory_period()
+    df = pd.DataFrame(rows)
+    df["year"] = year
+    df["week"] = week
+    df["period_label"] = label
+    df["snapshot_date"] = datetime.now().date()
+    df["source"] = source
+    engine = conn.session.get_bind()
+    with engine.begin() as connection:
+        connection.execute(
+            text("delete from inventory_value_snapshots where year = :y and week = :w and source = :s"),
+            {"y": year, "w": week, "s": source},
+        )
+        df.to_sql(
+            "inventory_value_snapshots", con=connection, if_exists="append", index=False,
+            method="multi", chunksize=1000,
+        )
+
+
+def build_camp_value_snapshot_rows(data):
+    rows = []
+    for it in data["items"]:
+        code = it.get("c")
+        if not code:
+            continue
+        for camp, (q, a) in it.get("x", {}).items():
+            if q == 0 and a == 0:
+                continue
+            rows.append(
+                {
+                    "camp": camp,
+                    "item_code": code,
+                    "item_name": it["n"],
+                    "qty": q,
+                    "unit_price": (a / q) if q else None,
+                    "amt": a,
+                }
+            )
+    return rows
+
+
+def build_warehouse_value_snapshot_rows(wh_items):
+    rows = []
+    for it in wh_items:
+        sku = it.get("sku")
+        if not sku:
+            continue
+        qty = it.get("quantity", 0)
+        price = float(it.get("price") or 0)
+        rows.append(
+            {
+                "camp": "",
+                "item_code": sku,
+                "item_name": it.get("name"),
+                "qty": qty,
+                "unit_price": price if qty else None,
+                "amt": qty * price,
+            }
+        )
+    return rows
+
+
+def load_inventory_value_trend():
+    """주 x 구분(캠프/창고)별 재고 금액 합계 추이 (스냅샷 당시 단가 기준)."""
+    conn = get_db_connection()
+    return conn.query(
+        """
+        select year, week, period_label, max(snapshot_date) as snapshot_date, source,
+               sum(qty) as qty, sum(amt) as amt
+        from inventory_value_snapshots
+        group by year, week, period_label, source
+        order by year, week
+        """,
+        ttl=60,
+    )
+
+
 def list_warehouse_orders():
     """전체 발주 요청 이력을 최신순으로 반환."""
     conn = get_db_connection()
@@ -1023,6 +1117,14 @@ team_df = camp_df.groupby("팀", as_index=False)[["재고 수량", "재고 금�
 grand_qty = sum(it["q"] for it in data["items"])
 grand_amt = sum(it["a"] for it in data["items"])
 zero_camps = int((camp_df["재고 수량"] == 0).sum())
+
+_cur_period_label = current_inventory_period()[2]
+if st.session_state.get("_camp_value_snap_period") != _cur_period_label:
+    try:
+        save_inventory_value_snapshot("camp", build_camp_value_snapshot_rows(data))
+        st.session_state["_camp_value_snap_period"] = _cur_period_label
+    except Exception:
+        pass  # 스냅샷 저장 실패해도 화면 표시는 계속 진행
 
 
 def get_usage_for_code(code):
@@ -1869,6 +1971,53 @@ with tab_total:
             )
             st.altair_chart(breakdown_bar, width="stretch")
 
+            st.subheader("주별 재고 금액 추이 (창고 + 캠프)")
+            trend_raw = load_inventory_value_trend()
+            if trend_raw.empty:
+                st.caption("아직 쌓인 현황이 없어요. 이번 주부터 자동으로 쌓여요 (매주 처음 접속할 때 그 주의 최신 값으로 갱신돼요).")
+            else:
+                trend_wide = trend_raw.pivot_table(
+                    index="period_label", columns="source", values="amt", aggfunc="sum", fill_value=0
+                ).reset_index()
+                for col in ("camp", "warehouse"):
+                    if col not in trend_wide.columns:
+                        trend_wide[col] = 0
+                trend_wide["전체"] = trend_wide["camp"] + trend_wide["warehouse"]
+                trend_wide = trend_wide.rename(columns={"camp": "캠프", "warehouse": "물류창고"})
+                trend_long = trend_wide.melt(
+                    id_vars="period_label", value_vars=["전체", "캠프", "물류창고"], var_name="구분", value_name="재고 금액"
+                )
+                trend_line = (
+                    alt.Chart(trend_long)
+                    .mark_line(point=True, strokeWidth=2)
+                    .encode(
+                        x=alt.X(
+                            "period_label:O",
+                            sort=None,
+                            title=None,
+                            axis=alt.Axis(labelColor=CHART_MUTED, labelFontSize=11, domain=False, ticks=False, grid=False),
+                        ),
+                        y=alt.Y(
+                            "재고 금액:Q",
+                            title=None,
+                            axis=alt.Axis(
+                                labelColor=CHART_MUTED, labelFontSize=11, domain=False, ticks=False,
+                                gridColor=CHART_GRID, tickCount=4,
+                            ),
+                        ),
+                        color=alt.Color("구분:N", scale=alt.Scale(scheme="category10"), legend=alt.Legend(title=None, labelColor=CHART_MUTED)),
+                        tooltip=[alt.Tooltip("period_label:O", title="주차"), alt.Tooltip("구분:N"), alt.Tooltip("재고 금액:Q", format=",.0f")],
+                    )
+                    .properties(height=240)
+                    .configure_view(strokeWidth=0)
+                    .configure(background="transparent")
+                )
+                st.altair_chart(trend_line, width="stretch")
+                st.caption(
+                    "스냅샷 시점 단가 기준 금액이에요. SKU별 수량은 그대로 쌓이고 있어서, 나중에 필요하면 "
+                    "같은 기준(예: 현재 단가)으로 다시 계산한 추이도 만들 수 있어요."
+                )
+
             st.subheader("SKU별 창고-캠프 재고 비교")
             camp_by_sku = {
                 it["c"].strip().upper(): it for it in data["items"] if it.get("c")
@@ -2150,6 +2299,14 @@ with tab_warehouse:
                 save_warehouse_snapshot(warehouse_qty, warehouse_amt, len(wh_items))
             except Exception:
                 pass  # 스냅샷 저장에 실패해도 화면 표시는 계속 진행
+
+            _cur_period_label = current_inventory_period()[2]
+            if st.session_state.get("_wh_value_snap_period") != _cur_period_label:
+                try:
+                    save_inventory_value_snapshot("warehouse", build_warehouse_value_snapshot_rows(wh_items))
+                    st.session_state["_wh_value_snap_period"] = _cur_period_label
+                except Exception:
+                    pass  # 스냅샷 저장에 실패해도 화면 표시는 계속 진행
 
             st.subheader("월별 물류창고 재고 금액")
             snapshots = load_warehouse_snapshots()
