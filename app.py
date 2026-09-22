@@ -249,6 +249,129 @@ def parse_inventory_excel(file) -> dict:
     }
 
 
+# ---------------- 태블로 재고 데이터 자동 동기화 ----------------
+# "재고 내역_ver2" 뷰는 태블로 REST API로 롱 포맷(품목x캠프x측정값 1행씩) CSV를 내려준다.
+# parse_inventory_excel이 만드는 것과 같은 내부 구조로 피벗해서 맞춰준다.
+
+TABLEAU_API_VERSION = "3.24"
+
+
+def get_tableau_config():
+    try:
+        return st.secrets["tableau"]
+    except Exception:
+        return None
+
+
+def get_tableau_session():
+    """태블로에 로그인해 (auth_token, site_id)를 세션 동안 캐시해서 반환."""
+    if "tableau_auth" in st.session_state:
+        return st.session_state["tableau_auth"]
+    cfg = get_tableau_config()
+    if not cfg:
+        return None
+    resp = requests.post(
+        f"{cfg['server']}/api/{TABLEAU_API_VERSION}/auth/signin",
+        json={
+            "credentials": {
+                "personalAccessTokenName": cfg["token_name"],
+                "personalAccessTokenSecret": cfg["token_secret"],
+                "site": {"contentUrl": cfg["site"]},
+            }
+        },
+        headers={"Accept": "application/json"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    cred = resp.json()["credentials"]
+    auth = (cred["token"], cred["site"]["id"])
+    st.session_state["tableau_auth"] = auth
+    return auth
+
+
+def parse_tableau_inventory(csv_bytes) -> dict:
+    """태블로 '재고 내역_ver2' 뷰의 롱 포맷 CSV를 parse_inventory_excel과 같은 내부 구조로 변환."""
+    import io
+
+    df = pd.read_csv(io.BytesIO(csv_bytes))
+    df.columns = [c.strip() for c in df.columns]
+    df["Measure Values"] = (
+        df["Measure Values"].astype(str).str.replace(",", "", regex=False).astype(float)
+    )
+    # 태블로 뷰에 "전체 합계" 옵션이 켜져 있어, 부품/캠프/센터 모두 "All"인 합계용 가짜 행이 섞여 나온다.
+    for col in ("부품 번호", "부품명", "캠프", "센터"):
+        df = df[df[col].astype(str).str.strip() != "All"]
+
+    teams, camps_order, camp_to_team = [], [], {}
+    for _, r in df[["센터", "캠프"]].drop_duplicates().iterrows():
+        team, camp = str(r["센터"]).strip(), str(r["캠프"]).strip()
+        if team not in teams:
+            teams.append(team)
+        if camp not in camps_order:
+            camps_order.append(camp)
+            camp_to_team[camp] = team
+
+    if not camps_order:
+        raise ValueError("캠프/팀 정보를 찾을 수 없습니다. 태블로 뷰 구조가 바뀌었는지 확인해주세요.")
+
+    pivot = df.pivot_table(
+        index=["부품 번호", "부품명", "캠프"],
+        columns="Measure Names",
+        values="Measure Values",
+        aggfunc="sum",
+        fill_value=0,
+    ).reset_index()
+    for col in ("재고 수량", "재고 금액"):
+        if col not in pivot.columns:
+            pivot[col] = 0
+
+    items = []
+    for (code, name), g in pivot.groupby(["부품 번호", "부품명"], sort=False):
+        tot_qty = int(g["재고 수량"].sum())
+        tot_amt = int(g["재고 금액"].sum())
+        camps = {}
+        for _, r in g.iterrows():
+            q, a = int(r["재고 수량"]), int(r["재고 금액"])
+            if q != 0 or a != 0:
+                camps[str(r["캠프"]).strip()] = [q, a]
+        items.append(
+            {"n": str(name).strip(), "c": "" if pd.isna(code) else str(code).strip(), "q": tot_qty, "a": tot_amt, "x": camps}
+        )
+    items.sort(key=lambda it: it["n"])
+
+    if not items:
+        raise ValueError("품목 데이터를 찾을 수 없습니다.")
+
+    return {
+        "updatedAt": datetime.now().isoformat(),
+        "teams": teams,
+        "campToTeam": camp_to_team,
+        "campsOrder": camps_order,
+        "items": items,
+    }
+
+
+def fetch_tableau_inventory():
+    """태블로에서 최신 재고 뷰 데이터를 받아와 내부 구조로 변환해 반환. 토큰이 만료됐으면 한 번 재로그인한다."""
+    cfg = get_tableau_config()
+    if not cfg:
+        raise RuntimeError("태블로 연동 정보(.streamlit/secrets.toml의 [tableau])가 없습니다.")
+
+    for attempt in range(2):
+        auth = get_tableau_session()
+        token, site_id = auth
+        resp = requests.get(
+            f"{cfg['server']}/api/{TABLEAU_API_VERSION}/sites/{site_id}/views/{cfg['inventory_view_id']}/data",
+            headers={"X-Tableau-Auth": token},
+            timeout=90,
+        )
+        if resp.status_code == 401 and attempt == 0:
+            st.session_state.pop("tableau_auth", None)
+            continue
+        resp.raise_for_status()
+        return parse_tableau_inventory(resp.content)
+
+
 def get_db_connection():
     try:
         return st.connection(DB_CONN_NAME, type="sql")
@@ -491,6 +614,86 @@ def camp_weekly_usage_rate(code, camp):
         return None
     u = item_usage.get(camp)
     return u.get("avg") if u else None
+
+
+def top_camp_items_recent(camp, limit=30):
+    """usage_facts 기준, 해당 캠프의 최근 3개월(이번 달 제외) 사용량 상위 품목과 월평균을 반환."""
+    conn = get_db_connection()
+    now = datetime.now()
+    sql = """
+        with recent_months as (
+            select distinct year, month from usage_facts
+            where (year, month) < (:cur_year, :cur_month)
+            order by year desc, month desc
+            limit 3
+        ),
+        scoped as (
+            select f.item_code, f.item_name, f.year, f.month, sum(f.qty) as month_qty
+            from usage_facts f
+            join recent_months rm on f.year = rm.year and f.month = rm.month
+            where f.camp = :camp
+            group by f.item_code, f.item_name, f.year, f.month
+        )
+        select item_code, item_name, round(sum(month_qty) / count(*), 2) as avg_qty
+        from scoped
+        group by item_code, item_name
+        order by sum(month_qty) desc
+        limit :limit
+    """
+    return conn.query(
+        sql, params={"cur_year": now.year, "cur_month": now.month, "camp": camp, "limit": limit}, ttl=0
+    )
+
+
+def save_demand_forecasts(rows):
+    """rows: camp/item_code/item_name/forecast_year/forecast_month/predicted_qty/historical_avg_qty/entered_by
+    딕셔너리 리스트. 같은 (캠프,품목,연,월) 조합이면 덮어쓴다."""
+    if not rows:
+        return
+    conn = get_db_connection()
+    with conn.session as session:
+        session.execute(
+            text(
+                """
+                insert into demand_forecasts
+                    (camp, item_code, item_name, forecast_year, forecast_month,
+                     predicted_qty, historical_avg_qty, entered_by)
+                values (:camp, :item_code, :item_name, :forecast_year, :forecast_month,
+                        :predicted_qty, :historical_avg_qty, :entered_by)
+                on conflict (camp, item_code, forecast_year, forecast_month) do update
+                set predicted_qty = excluded.predicted_qty,
+                    historical_avg_qty = excluded.historical_avg_qty,
+                    entered_by = excluded.entered_by,
+                    updated_at = now()
+                """
+            ),
+            rows,
+        )
+        session.commit()
+
+
+def load_demand_forecasts(camp, year, month):
+    conn = get_db_connection()
+    return conn.query(
+        "select * from demand_forecasts where camp = :camp and forecast_year = :year and forecast_month = :month",
+        params={"camp": camp, "year": year, "month": month},
+        ttl=0,
+    )
+
+
+def list_demand_forecasts(camp=None):
+    conn = get_db_connection()
+    if camp:
+        return conn.query(
+            "select * from demand_forecasts where camp = :camp "
+            "order by forecast_year desc, forecast_month desc, item_code",
+            params={"camp": camp},
+            ttl=0,
+        )
+    return conn.query(
+        "select * from demand_forecasts order by forecast_year desc, forecast_month desc, camp, item_code",
+        ttl=0,
+    )
 
 
 def find_item_by_code(inventory, code):
@@ -753,6 +956,18 @@ with col_upload1:
         except Exception as e:
             st.error(f"파일을 읽는 중 문제가 발생했습니다: {e}", icon=":material/error:")
 
+    if get_tableau_config():
+        if st.button("태블로에서 바로 동기화", icon=":material/sync:", key="tableau_sync_btn"):
+            try:
+                with st.spinner("태블로에서 재고 데이터를 받아오는 중이에요..."):
+                    parsed = fetch_tableau_inventory()
+                save_data("inventory", parsed)
+                st.session_state.inventory = parsed
+                data = parsed
+                st.success(f"동기화 완료 · 품목 {len(parsed['items']):,}개 · 캠프 {len(parsed['campsOrder'])}곳", icon=":material/check_circle:")
+            except Exception as e:
+                st.error(f"태블로 동기화 중 문제가 발생했습니다: {e}", icon=":material/error:")
+
 with col_upload2:
     usage_file = st.file_uploader(
         "사용량 데이터 갱신 (엑셀 또는 JSON)", type=["xlsx", "xls", "json"], key="usage_upload"
@@ -837,13 +1052,17 @@ def estimate_depletion(qty, code):
 
 # ---------------- 탭 ----------------
 
-tab_overview, tab_camps, tab_items, tab_rebalance, tab_usage_amount, tab_warehouse, tab_purchase, tab_total = st.tabs(
+(
+    tab_overview, tab_camps, tab_items, tab_rebalance, tab_usage_amount,
+    tab_forecast, tab_warehouse, tab_purchase, tab_total,
+) = st.tabs(
     [
         ":material/dashboard: 개요",
         ":material/location_on: 캠프별 현황",
         ":material/search: 품목 검색",
         ":material/sync_alt: 재분배 도우미",
         ":material/payments: 월별 사용 금액",
+        ":material/query_stats: 수요 예측",
         ":material/warehouse: 창고 현황",
         ":material/local_shipping: 발주 요청",
         ":material/inventory: 지바이크 전체 재고",
@@ -1465,6 +1684,125 @@ with tab_usage_amount:
                         "월평균 사용금액": st.column_config.NumberColumn(format="₩%,d"),
                     },
                 )
+
+with tab_forecast:
+    st.caption(
+        "캠프별로 품목별 다음 몇 달치 예상 사용량을 직접 입력해요. 최근 3개월(이번 달 제외) 평균이 "
+        "참고용으로 먼저 채워지고, 필요하면 조정해서 저장하면 됩니다. "
+        "(추후 회귀분석 기반 자동 예측으로 보완/대체할 예정)"
+    )
+
+    fc_my_name = st.text_input(
+        "내 이름", value=st.session_state.get("transfer_my_name", ""), key="fc_my_name_input"
+    )
+    st.session_state["transfer_my_name"] = fc_my_name
+
+    fc_camp = st.selectbox("캠프 선택", data["campsOrder"], key="fc_camp_select")
+
+    fc_now = datetime.now()
+    fc_month_options = []
+    fy, fm = fc_now.year, fc_now.month
+    for _ in range(3):
+        fm += 1
+        if fm > 12:
+            fm = 1
+            fy += 1
+        fc_month_options.append((fy, fm))
+    fc_month_labels = [f"{y}-{m:02d}" for y, m in fc_month_options]
+    fc_month_label = st.selectbox("예측 대상 월", fc_month_labels, key="fc_month_select")
+    fc_year, fc_month = fc_month_options[fc_month_labels.index(fc_month_label)]
+
+    try:
+        with st.spinner("최근 사용 품목을 불러오는 중이에요..."):
+            top_items_df = top_camp_items_recent(fc_camp, limit=30)
+            existing_df = load_demand_forecasts(fc_camp, fc_year, fc_month)
+    except Exception as e:
+        st.error(f"데이터를 불러오는 중 문제가 발생했습니다: {e}", icon=":material/error:")
+    else:
+        if top_items_df.empty:
+            st.caption(f"{fc_camp}의 최근 3개월 사용량 데이터가 없어요.")
+        else:
+            existing_by_code = (
+                {row["item_code"]: row for _, row in existing_df.iterrows()} if not existing_df.empty else {}
+            )
+
+            fc_rows = []
+            for _, r in top_items_df.iterrows():
+                code = r["item_code"]
+                existing = existing_by_code.get(code)
+                default_qty = (
+                    float(existing["predicted_qty"]) if existing is not None else round(r["avg_qty"] or 0, 1)
+                )
+                fc_rows.append(
+                    {
+                        "SKU": code,
+                        "품명": r["item_name"] or "-",
+                        "최근 3개월 평균": r["avg_qty"],
+                        "예측 수량": default_qty,
+                    }
+                )
+            fc_table_df = pd.DataFrame(fc_rows)
+
+            st.caption(f"{fc_camp} · {fc_month_label} 예측 (최근 사용량 상위 {len(fc_table_df)}개 품목)")
+            with st.form(f"fc_form_{fc_camp}_{fc_year}_{fc_month}"):
+                fc_edited_df = st.data_editor(
+                    fc_table_df,
+                    hide_index=True,
+                    disabled=["SKU", "품명", "최근 3개월 평균"],
+                    column_config={
+                        "최근 3개월 평균": st.column_config.NumberColumn(format="%.1f개"),
+                        "예측 수량": st.column_config.NumberColumn(format="%d개", min_value=0, step=1),
+                    },
+                    key=f"fc_editor_{fc_camp}_{fc_year}_{fc_month}",
+                )
+                fc_submitted = st.form_submit_button("예측 저장", type="primary", icon=":material/save:")
+
+            if fc_submitted:
+                if not fc_my_name.strip():
+                    st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
+                else:
+                    save_rows = [
+                        {
+                            "camp": fc_camp,
+                            "item_code": r["SKU"],
+                            "item_name": r["품명"],
+                            "forecast_year": fc_year,
+                            "forecast_month": fc_month,
+                            "predicted_qty": float(r["예측 수량"]),
+                            "historical_avg_qty": (
+                                float(r["최근 3개월 평균"]) if pd.notna(r["최근 3개월 평균"]) else None
+                            ),
+                            "entered_by": fc_my_name.strip(),
+                        }
+                        for _, r in fc_edited_df.iterrows()
+                    ]
+                    save_demand_forecasts(save_rows)
+                    st.success(
+                        f"{fc_camp} {fc_month_label} 예측 {len(save_rows)}건을 저장했습니다.",
+                        icon=":material/check_circle:",
+                    )
+                    st.rerun()
+
+    st.subheader("저장된 예측 이력")
+    fc_hist_df = list_demand_forecasts(camp=fc_camp)
+    if fc_hist_df.empty:
+        st.caption("아직 저장된 예측이 없어요.")
+    else:
+        fc_hist_display = fc_hist_df.copy()
+        fc_hist_display["예측 대상월"] = (
+            fc_hist_display["forecast_year"].astype(str) + "-"
+            + fc_hist_display["forecast_month"].astype(str).str.zfill(2)
+        )
+        st.dataframe(
+            fc_hist_display[
+                ["예측 대상월", "item_name", "item_code", "predicted_qty", "historical_avg_qty", "entered_by"]
+            ].rename(columns={"item_name": "품명", "item_code": "SKU"}),
+            hide_index=True,
+            column_config={
+                "predicted_qty": st.column_config.NumberColumn("예측 수량", format="%.1f개"),
+                "historical_avg_qty": st.column_config.NumberColumn("최근 3개월 평균", format="%.1f개"),
+            },
+        )
 
 with tab_total:
     if not get_boxhero_token():

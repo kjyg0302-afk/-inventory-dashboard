@@ -81,3 +81,25 @@ create index if not exists idx_usage_facts_item on usage_facts (item_code);
 create index if not exists idx_usage_facts_camp on usage_facts (camp);
 create index if not exists idx_usage_facts_year_month on usage_facts (year, month);
 create index if not exists idx_usage_facts_year_week on usage_facts (year, week);
+
+-- 캠프별 x 품목별 x 월별 수요 예측 (캠프 담당자가 직접 입력).
+-- historical_avg_qty는 입력 시점의 최근 3개월 평균(참고용 스냅샷)이라 나중에 재계산해도 안 바뀐다.
+-- 추후 회귀분석 기반 자동 예측으로 대체/보완할 수 있도록 값만 갱신하면 되는 구조로 둔다.
+create table if not exists demand_forecasts (
+    id bigserial primary key,
+    camp text not null,
+    item_code text not null,
+    item_name text,
+    forecast_year integer not null,
+    forecast_month integer not null,
+    predicted_qty numeric not null,
+    historical_avg_qty numeric,
+    entered_by text not null,
+    entered_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    unique (camp, item_code, forecast_year, forecast_month)
+);
+
+create index if not exists idx_demand_forecasts_camp_month
+    on demand_forecasts (camp, forecast_year, forecast_month);
+create index if not exists idx_demand_forecasts_item on demand_forecasts (item_code);
