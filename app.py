@@ -485,6 +485,28 @@ def list_pending_transfer_requests_for_camp(camp):
     )
 
 
+def list_incoming_transit_requests_for_camp(camp):
+    """해당 캠프가 받는 쪽으로, 승인되어 이동중이라 입고 확인이 필요한 이관 요청 목록."""
+    conn = get_db_connection()
+    return conn.query(
+        "select * from transfer_requests where to_camp = :camp and status = 'in_transit' "
+        "order by approved_at desc",
+        params={"camp": camp},
+        ttl=10,
+    )
+
+
+def list_my_requested_awaiting_approval(camp):
+    """해당 캠프가 받는 쪽으로 요청했고, 아직 상대 캠프의 승인을 기다리는 중인 목록 (정보성, 액션 없음)."""
+    conn = get_db_connection()
+    return conn.query(
+        "select * from transfer_requests where to_camp = :camp and status = 'requested' "
+        "order by requested_at desc",
+        params={"camp": camp},
+        ttl=10,
+    )
+
+
 def create_transfer_request(item_code, item_name, from_camp, to_camp, qty, requested_by):
     conn = get_db_connection()
     with conn.session as session:
@@ -691,6 +713,17 @@ def list_pending_warehouse_orders():
     )
 
 
+def list_incoming_warehouse_orders_for_camp(camp):
+    """해당 캠프가 받는 쪽으로, 승인되어 입고/검수 확인이 필요한 발주 요청 목록."""
+    conn = get_db_connection()
+    return conn.query(
+        "select * from warehouse_orders where to_camp = :camp and status = 'in_transit' "
+        "order by approved_at desc",
+        params={"camp": camp},
+        ttl=10,
+    )
+
+
 def create_warehouse_order(item_code, item_name, to_camp, qty, weekly_avg_usage, reason, requested_by):
     conn = get_db_connection()
     with conn.session as session:
@@ -887,13 +920,15 @@ def add_camp_stock(item, camp, qty, amt):
         item["x"][camp] = [qty, amt]
 
 
-def render_pending_request_row(r, data, my_name):
+def render_pending_request_row(r, data, my_name, key_prefix=""):
     """요청중 상태인 이관 요청 한 건을 표시하고 승인/거절 버튼을 처리한다.
-    로그인 배너의 "내 요청함"과 재분배 도우미 탭 양쪽에서 재사용한다."""
+    로그인 배너의 "내 요청함"과 재분배 도우미 탭 양쪽에서 재사용한다.
+    모든 탭이 매 rerun마다 함께 그려지는 Streamlit 특성상, 같은 요청이 배너와 탭에
+    동시에 나타날 수 있어 key_prefix로 위젯 키가 겹치지 않게 한다."""
     c0, c1, c2, c3 = st.columns([1, 4, 1, 1])
     c0.badge("요청중", icon=":material/schedule:", color="orange")
     c1.write(f"{r['item_name']} · {r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · 요청자: {r['requested_by']}")
-    if c2.button("승인", key=f"approve_{r['id']}"):
+    if c2.button("승인", key=f"{key_prefix}approve_{r['id']}"):
         if not my_name.strip():
             st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
         else:
@@ -915,7 +950,7 @@ def render_pending_request_row(r, data, my_name):
                 approve_transfer_request(r["id"], my_name.strip())
                 st.success("승인했습니다. 이동중 상태로 전환됩니다.", icon=":material/task_alt:")
                 st.rerun()
-    if c3.button("거절", key=f"reject_{r['id']}"):
+    if c3.button("거절", key=f"{key_prefix}reject_{r['id']}"):
         if not my_name.strip():
             st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
         else:
@@ -923,7 +958,30 @@ def render_pending_request_row(r, data, my_name):
             st.rerun()
 
 
-def render_pending_warehouse_order_row(r, my_name):
+def render_in_transit_request_row(r, data, my_name, key_prefix=""):
+    """이동중 상태인 이관 요청 한 건을 표시하고 입고완료 버튼을 처리한다.
+    로그인 배너의 "입고 확인 필요" 목록과 재분배 도우미 탭 양쪽에서 재사용한다."""
+    c0, c1, c2 = st.columns([1, 5, 1])
+    c0.badge("이동중", icon=":material/local_shipping:", color="blue")
+    c1.write(f"{r['item_name']} · {r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · 승인자: {r['approved_by']}")
+    if c2.button("입고완료", key=f"{key_prefix}receive_{r['id']}"):
+        if not my_name.strip():
+            st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
+        else:
+            item = find_item_by_code(data, r["item_code"])
+            try:
+                moved_amt = deduct_camp_stock(item, r["from_camp"], int(r["qty"]))
+            except ValueError as e:
+                st.error(str(e), icon=":material/error:")
+            else:
+                add_camp_stock(item, r["to_camp"], int(r["qty"]), moved_amt)
+                save_data("inventory", data)
+                complete_transfer_request(r["id"], my_name.strip(), moved_amt)
+                st.success("입고 완료 처리했습니다.", icon=":material/inventory_2:")
+                st.rerun()
+
+
+def render_pending_warehouse_order_row(r, my_name, key_prefix=""):
     """요청중 상태인 발주 요청(캠프 -> 물류창고) 한 건을 표시하고 승인/거절 버튼을 처리한다."""
     c0, c1, c2 = st.columns([4, 1, 1])
     reason_suffix = f" · 사유: {r['reason']}" if r.get("reason") else ""
@@ -931,18 +989,43 @@ def render_pending_warehouse_order_row(r, my_name):
         f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · "
         f"요청자: {r['requested_by']}{reason_suffix}"
     )
-    if c1.button("승인", key=f"wh_po_approve_{r['id']}"):
+    if c1.button("승인", key=f"{key_prefix}wh_po_approve_{r['id']}"):
         if not my_name.strip():
             st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
         else:
             approve_warehouse_order(r["id"], my_name.strip())
             st.rerun()
-    if c2.button("거절", key=f"wh_po_reject_{r['id']}"):
+    if c2.button("거절", key=f"{key_prefix}wh_po_reject_{r['id']}"):
         if not my_name.strip():
             st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
         else:
             reject_warehouse_order(r["id"], my_name.strip())
             st.rerun()
+
+
+def render_incoming_warehouse_order_row(r, data, my_name, key_prefix=""):
+    """승인되어 입고 대기중인 발주 요청(물류창고 -> 캠프) 한 건을 표시하고 입고완료 버튼을 처리한다.
+    입고완료는 실제로 물건을 받아 검수까지 마친 캠프가 눌러야 한다."""
+    c0, c1, c2 = st.columns([1, 5, 1])
+    c0.badge("승인됨", icon=":material/local_shipping:", color="blue")
+    c1.write(
+        f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · 승인자: {r['approved_by']}"
+    )
+    if c2.button("입고완료", key=f"{key_prefix}po_receive_{r['id']}"):
+        if not my_name.strip():
+            st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
+        else:
+            item = find_item_by_code(data, r["item_code"])
+            if not item:
+                st.error("해당 품목을 현재 재고 데이터에서 찾을 수 없어요.", icon=":material/error:")
+            else:
+                unit_amt = (item["a"] / item["q"]) if item.get("q") else 0
+                amt = round(unit_amt * r["qty"])
+                add_camp_stock(item, r["to_camp"], int(r["qty"]), amt)
+                save_data("inventory", data)
+                complete_warehouse_order(r["id"], my_name.strip(), amt)
+                st.success("입고 완료 처리했습니다.", icon=":material/inventory_2:")
+                st.rerun()
 
 
 # ---------------- 박스히어로(물류창고) 연동 ----------------
@@ -1282,6 +1365,9 @@ if not data:
 _login_accounts = data["campsOrder"] + ["물류창고"]
 
 auth = st.session_state["auth"]
+# 캠프로 로그인했을 때만 실제 소속 캠프로 제한한다. 관리자는 "캠프로 보기(my_camp)"를
+# 선택해도 탭 안의 이관 요청 목록 자체는 전부 보이는 게 맞아서 필터링하지 않는다.
+my_login_camp = auth["camp"] if auth["role"] == "camp" else None
 col_auth1, col_auth2 = st.columns([4, 1])
 with col_auth1:
     if auth["role"] == "camp":
@@ -1314,24 +1400,54 @@ if my_camp == "물류창고":
         )
         st.session_state["transfer_my_name"] = my_name_banner
         for _, r in pending_df.iterrows():
-            render_pending_warehouse_order_row(r, my_name_banner)
+            render_pending_warehouse_order_row(r, my_name_banner, key_prefix="banner_")
 elif my_camp:
     try:
-        pending_df = list_pending_transfer_requests_for_camp(my_camp)
+        pending_out_df = list_pending_transfer_requests_for_camp(my_camp)
+        incoming_transit_df = list_incoming_transit_requests_for_camp(my_camp)
+        incoming_wh_df = list_incoming_warehouse_orders_for_camp(my_camp)
+        my_awaiting_df = list_my_requested_awaiting_approval(my_camp)
     except Exception:
-        pending_df = pd.DataFrame()
-    if not pending_df.empty:
-        st.warning(
-            f"**{my_camp}** 앞으로 승인 대기 중인 이관 요청이 **{len(pending_df)}건** 있어요. "
-            "아래에서 바로 승인/거절할 수 있어요.",
-            icon=":material/notifications_active:",
-        )
+        pending_out_df = pd.DataFrame()
+        incoming_transit_df = pd.DataFrame()
+        incoming_wh_df = pd.DataFrame()
+        my_awaiting_df = pd.DataFrame()
+
+    actionable_n = len(pending_out_df) + len(incoming_transit_df) + len(incoming_wh_df)
+    if actionable_n > 0 or not my_awaiting_df.empty:
+        if actionable_n > 0:
+            st.warning(
+                f"**{my_camp}** 앞으로 처리할 요청이 **{actionable_n}건** 있어요. "
+                "아래에서 바로 처리할 수 있어요.",
+                icon=":material/notifications_active:",
+            )
         my_name_banner = st.text_input(
             "내 이름", value=st.session_state.get("transfer_my_name", ""), key="banner_my_name_input"
         )
         st.session_state["transfer_my_name"] = my_name_banner
-        for _, r in pending_df.iterrows():
-            render_pending_request_row(r, data, my_name_banner)
+
+        if not pending_out_df.empty:
+            st.markdown("**승인 대기중 (내가 보내는 쪽, 캠프 간 이관)**")
+            for _, r in pending_out_df.iterrows():
+                render_pending_request_row(r, data, my_name_banner, key_prefix="banner_")
+
+        if not incoming_transit_df.empty:
+            st.markdown("**입고 확인 필요 (캠프 간 이관)**")
+            for _, r in incoming_transit_df.iterrows():
+                render_in_transit_request_row(r, data, my_name_banner, key_prefix="banner_")
+
+        if not incoming_wh_df.empty:
+            st.markdown("**입고/검수 확인 필요 (물류창고 발주)**")
+            for _, r in incoming_wh_df.iterrows():
+                render_incoming_warehouse_order_row(r, data, my_name_banner, key_prefix="banner_")
+
+        if not my_awaiting_df.empty:
+            st.markdown("**내 요청 · 상대 캠프 승인 대기중** (정보용, 상대가 승인해야 진행돼요)")
+            for _, r in my_awaiting_df.iterrows():
+                st.caption(
+                    f":material/schedule: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
+                    f"{int(r['qty'])}개"
+                )
 
 if auth["role"] == "admin":
     with st.expander("🔑 캠프/창고 비밀번호 관리 (관리자 전용)"):
@@ -1710,6 +1826,9 @@ with tab_rebalance:
                     st.rerun()
 
         req_df = list_transfer_requests(item_code)
+        if my_login_camp and not req_df.empty:
+            # 캠프로 로그인했으면 나와 관련된(보내거나 받는) 요청만 보여준다.
+            req_df = req_df[(req_df["from_camp"] == my_login_camp) | (req_df["to_camp"] == my_login_camp)]
         requested_rows = req_df[req_df["status"] == "requested"] if not req_df.empty else req_df
         in_transit_rows = req_df[req_df["status"] == "in_transit"] if not req_df.empty else req_df
         done_rows = req_df[req_df["status"].isin(["completed", "rejected"])] if not req_df.empty else req_df
@@ -1717,31 +1836,26 @@ with tab_rebalance:
         if not requested_rows.empty:
             st.markdown("**요청중**")
             for _, r in requested_rows.iterrows():
-                render_pending_request_row(r, data, my_name)
+                if not my_login_camp or r["from_camp"] == my_login_camp:
+                    render_pending_request_row(r, data, my_name)
+                else:
+                    # 내가 승인 주체가 아니라 내가 요청한 쪽(to_camp) — 진행 상황만 보여준다.
+                    st.caption(
+                        f":material/schedule: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
+                        f"{int(r['qty'])}개 · 요청자: {r['requested_by']} (상대 캠프 승인 대기중)"
+                    )
 
         if not in_transit_rows.empty:
             st.markdown("**이동중**")
             for _, r in in_transit_rows.iterrows():
-                c0, c1, c2 = st.columns([1, 5, 1])
-                c0.badge("이동중", icon=":material/local_shipping:", color="blue")
-                c1.write(
-                    f"{r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · 승인자: {r['approved_by']}"
-                )
-                if c2.button("입고완료", key=f"receive_{r['id']}"):
-                    if not my_name.strip():
-                        st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
-                    else:
-                        item = find_item_by_code(data, item_code)
-                        try:
-                            moved_amt = deduct_camp_stock(item, r["from_camp"], int(r["qty"]))
-                        except ValueError as e:
-                            st.error(str(e), icon=":material/error:")
-                        else:
-                            add_camp_stock(item, r["to_camp"], int(r["qty"]), moved_amt)
-                            save_data("inventory", data)
-                            complete_transfer_request(r["id"], my_name.strip(), moved_amt)
-                            st.success("입고 완료 처리했습니다.", icon=":material/inventory_2:")
-                            st.rerun()
+                if not my_login_camp or r["to_camp"] == my_login_camp:
+                    render_in_transit_request_row(r, data, my_name)
+                else:
+                    # 내가 입고완료 주체가 아니라 보낸 쪽(from_camp) — 진행 상황만 보여준다.
+                    st.caption(
+                        f":material/local_shipping: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
+                        f"{int(r['qty'])}개 · 승인자: {r['approved_by']} (입고 대기중)"
+                    )
 
         if not done_rows.empty:
             with st.expander(f"완료/거절 내역 ({len(done_rows)}건)", icon=":material/history:"):
@@ -2395,74 +2509,77 @@ with tab_purchase:
                 st.rerun()
 
     po_df = list_warehouse_orders()
+    can_approve_po = auth["role"] == "admin" or my_login_camp == "물류창고"
+    if my_login_camp and my_login_camp != "물류창고" and not po_df.empty:
+        # 캠프로 로그인했으면(물류창고 제외) 내 캠프로 오는 발주만 보여준다.
+        po_df = po_df[po_df["to_camp"] == my_login_camp]
     po_requested = po_df[po_df["status"] == "requested"] if not po_df.empty else po_df
     po_in_transit = po_df[po_df["status"] == "in_transit"] if not po_df.empty else po_df
     po_done = po_df[po_df["status"].isin(["completed", "rejected"])] if not po_df.empty else po_df
 
     if not po_requested.empty:
         st.markdown("**요청중**")
-        for _, r in po_requested.iterrows():
-            c0, c1, c2, c3, c4 = st.columns([0.5, 1, 4, 1, 1])
-            c0.checkbox("", key=f"po_bulk_chk_{r['id']}", label_visibility="collapsed")
-            c1.badge("요청중", icon=":material/schedule:", color="orange")
-            reason_suffix = f" · 사유: {r['reason']}" if r.get("reason") else ""
-            c2.write(
-                f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · "
-                f"요청자: {r['requested_by']}{reason_suffix}"
-            )
-            if c3.button("승인", key=f"po_approve_{r['id']}"):
-                if not po_my_name.strip():
-                    st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
-                else:
-                    approve_warehouse_order(r["id"], po_my_name.strip())
-                    st.rerun()
-            if c4.button("거절", key=f"po_reject_{r['id']}"):
-                if not po_my_name.strip():
-                    st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
-                else:
-                    reject_warehouse_order(r["id"], po_my_name.strip())
-                    st.rerun()
+        if can_approve_po:
+            for _, r in po_requested.iterrows():
+                c0, c1, c2, c3, c4 = st.columns([0.5, 1, 4, 1, 1])
+                c0.checkbox("", key=f"po_bulk_chk_{r['id']}", label_visibility="collapsed")
+                c1.badge("요청중", icon=":material/schedule:", color="orange")
+                reason_suffix = f" · 사유: {r['reason']}" if r.get("reason") else ""
+                c2.write(
+                    f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · "
+                    f"요청자: {r['requested_by']}{reason_suffix}"
+                )
+                if c3.button("승인", key=f"po_approve_{r['id']}"):
+                    if not po_my_name.strip():
+                        st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
+                    else:
+                        approve_warehouse_order(r["id"], po_my_name.strip())
+                        st.rerun()
+                if c4.button("거절", key=f"po_reject_{r['id']}"):
+                    if not po_my_name.strip():
+                        st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
+                    else:
+                        reject_warehouse_order(r["id"], po_my_name.strip())
+                        st.rerun()
 
-        po_bulk_ids = [
-            int(r["id"]) for _, r in po_requested.iterrows() if st.session_state.get(f"po_bulk_chk_{r['id']}")
-        ]
-        if po_bulk_ids:
-            if st.button(
-                f"체크한 {len(po_bulk_ids)}건 일괄 승인", type="primary", icon=":material/done_all:",
-                key="po_bulk_approve_btn",
-            ):
-                if not po_my_name.strip():
-                    st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
-                else:
-                    for oid in po_bulk_ids:
-                        approve_warehouse_order(oid, po_my_name.strip())
-                    st.success(f"{len(po_bulk_ids)}건을 일괄 승인했습니다.", icon=":material/done_all:")
-                    st.rerun()
+            po_bulk_ids = [
+                int(r["id"]) for _, r in po_requested.iterrows() if st.session_state.get(f"po_bulk_chk_{r['id']}")
+            ]
+            if po_bulk_ids:
+                if st.button(
+                    f"체크한 {len(po_bulk_ids)}건 일괄 승인", type="primary", icon=":material/done_all:",
+                    key="po_bulk_approve_btn",
+                ):
+                    if not po_my_name.strip():
+                        st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
+                    else:
+                        for oid in po_bulk_ids:
+                            approve_warehouse_order(oid, po_my_name.strip())
+                        st.success(f"{len(po_bulk_ids)}건을 일괄 승인했습니다.", icon=":material/done_all:")
+                        st.rerun()
+        else:
+            # 승인/거절은 물류창고(또는 관리자)만 할 수 있어서, 캠프 로그인에는 진행 상황만 보여준다.
+            for _, r in po_requested.iterrows():
+                reason_suffix = f" · 사유: {r['reason']}" if r.get("reason") else ""
+                st.caption(
+                    f":material/schedule: {r['item_name']} ({r['item_code']}) → {r['to_camp']} · "
+                    f"{int(r['qty'])}개 · 요청자: {r['requested_by']}{reason_suffix} (창고 승인 대기중)"
+                )
 
     if not po_in_transit.empty:
         st.markdown("**승인됨 (입고 대기)**")
         for _, r in po_in_transit.iterrows():
-            c0, c1, c2 = st.columns([1, 5, 1])
-            c0.badge("승인됨", icon=":material/local_shipping:", color="blue")
-            c1.write(
-                f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · "
-                f"승인자: {r['approved_by']}"
-            )
-            if c2.button("입고완료", key=f"po_receive_{r['id']}"):
-                if not po_my_name.strip():
-                    st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
-                else:
-                    item = find_item_by_code(data, r["item_code"])
-                    if not item:
-                        st.error("해당 품목을 현재 재고 데이터에서 찾을 수 없어요.", icon=":material/error:")
-                    else:
-                        unit_amt = (item["a"] / item["q"]) if item.get("q") else 0
-                        amt = round(unit_amt * r["qty"])
-                        add_camp_stock(item, r["to_camp"], int(r["qty"]), amt)
-                        save_data("inventory", data)
-                        complete_warehouse_order(r["id"], po_my_name.strip(), amt)
-                        st.success("입고 완료 처리했습니다.", icon=":material/inventory_2:")
-                        st.rerun()
+            can_receive = auth["role"] == "admin" or my_login_camp == r["to_camp"]
+            if can_receive:
+                render_incoming_warehouse_order_row(r, data, po_my_name)
+            else:
+                # 입고완료는 실제로 받는 캠프(또는 관리자)만 할 수 있어서, 그 외에는 진행 상황만 보여준다.
+                ic0, ic1 = st.columns([1, 6])
+                ic0.badge("승인됨", icon=":material/local_shipping:", color="blue")
+                ic1.write(
+                    f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · "
+                    f"승인자: {r['approved_by']}"
+                )
 
     if not po_done.empty:
         with st.expander(f"완료/거절 내역 ({len(po_done)}건)", icon=":material/history:"):
