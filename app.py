@@ -7,8 +7,10 @@
   유지됩니다. (연결 설정은 .streamlit/secrets.toml.example, schema.sql 참고)
 """
 
+import hashlib
 import json
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import altair as alt
@@ -385,6 +387,48 @@ def get_db_connection():
         st.stop()
 
 
+def hash_password(password):
+    salt = uuid.uuid4().hex
+    digest = hashlib.sha256((salt + password).encode()).hexdigest()
+    return f"{salt}${digest}"
+
+
+def verify_password(password, stored_hash):
+    if not stored_hash or "$" not in stored_hash:
+        return False
+    salt, digest = stored_hash.split("$", 1)
+    return hashlib.sha256((salt + password).encode()).hexdigest() == digest
+
+
+def list_camp_credential_names():
+    conn = get_db_connection()
+    df = conn.query("select camp from camp_credentials order by camp", ttl=30)
+    return df["camp"].tolist()
+
+
+def get_camp_password_hash(camp):
+    conn = get_db_connection()
+    df = conn.query(
+        "select password_hash from camp_credentials where camp = :camp", params={"camp": camp}, ttl=0
+    )
+    return df.iloc[0]["password_hash"] if not df.empty else None
+
+
+def set_camp_password(camp, password):
+    conn = get_db_connection()
+    with conn.session as session:
+        session.execute(
+            text(
+                """
+                insert into camp_credentials (camp, password_hash) values (:camp, :hash)
+                on conflict (camp) do update set password_hash = excluded.password_hash, updated_at = now()
+                """
+            ),
+            {"camp": camp, "hash": hash_password(password)},
+        )
+        session.commit()
+
+
 def load_data(key):
     """app_data 테이블에서 key에 해당하는 JSON 데이터를 읽어온다. 없으면 None."""
     conn = get_db_connection()
@@ -427,6 +471,17 @@ def list_transfer_requests(item_code):
         "select * from transfer_requests where item_code = :item_code order by requested_at desc",
         params={"item_code": item_code},
         ttl=0,
+    )
+
+
+def list_pending_transfer_requests_for_camp(camp):
+    """해당 캠프가 보내는 쪽으로 승인 대기 중인(=아직 처리 안 한) 이관 요청 목록."""
+    conn = get_db_connection()
+    return conn.query(
+        "select * from transfer_requests where from_camp = :camp and status = 'requested' "
+        "order by requested_at desc",
+        params={"camp": camp},
+        ttl=10,
     )
 
 
@@ -627,6 +682,15 @@ def list_warehouse_orders():
     return conn.query("select * from warehouse_orders order by requested_at desc", ttl=0)
 
 
+def list_pending_warehouse_orders():
+    """물류창고가 승인해야 할, 아직 처리 안 한 발주 요청 목록."""
+    conn = get_db_connection()
+    return conn.query(
+        "select * from warehouse_orders where status = 'requested' order by requested_at desc",
+        ttl=10,
+    )
+
+
 def create_warehouse_order(item_code, item_name, to_camp, qty, weekly_avg_usage, reason, requested_by):
     conn = get_db_connection()
     with conn.session as session:
@@ -823,6 +887,64 @@ def add_camp_stock(item, camp, qty, amt):
         item["x"][camp] = [qty, amt]
 
 
+def render_pending_request_row(r, data, my_name):
+    """요청중 상태인 이관 요청 한 건을 표시하고 승인/거절 버튼을 처리한다.
+    로그인 배너의 "내 요청함"과 재분배 도우미 탭 양쪽에서 재사용한다."""
+    c0, c1, c2, c3 = st.columns([1, 4, 1, 1])
+    c0.badge("요청중", icon=":material/schedule:", color="orange")
+    c1.write(f"{r['item_name']} · {r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · 요청자: {r['requested_by']}")
+    if c2.button("승인", key=f"approve_{r['id']}"):
+        if not my_name.strip():
+            st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
+        else:
+            item = find_item_by_code(data, r["item_code"])
+            current_qty = item["x"].get(r["from_camp"], [0, 0])[0] if item else 0
+            req_df_all = list_transfer_requests(r["item_code"])
+            already_out = int(
+                req_df_all[
+                    (req_df_all["status"] == "in_transit") & (req_df_all["from_camp"] == r["from_camp"])
+                ]["qty"].sum()
+            )
+            available = current_qty - already_out
+            if available < r["qty"]:
+                st.error(
+                    f"{r['from_camp']}의 가용재고가 부족합니다. (가용 {available}개, 요청 {int(r['qty'])}개)",
+                    icon=":material/error:",
+                )
+            else:
+                approve_transfer_request(r["id"], my_name.strip())
+                st.success("승인했습니다. 이동중 상태로 전환됩니다.", icon=":material/task_alt:")
+                st.rerun()
+    if c3.button("거절", key=f"reject_{r['id']}"):
+        if not my_name.strip():
+            st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
+        else:
+            reject_transfer_request(r["id"], my_name.strip())
+            st.rerun()
+
+
+def render_pending_warehouse_order_row(r, my_name):
+    """요청중 상태인 발주 요청(캠프 -> 물류창고) 한 건을 표시하고 승인/거절 버튼을 처리한다."""
+    c0, c1, c2 = st.columns([4, 1, 1])
+    reason_suffix = f" · 사유: {r['reason']}" if r.get("reason") else ""
+    c0.write(
+        f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · "
+        f"요청자: {r['requested_by']}{reason_suffix}"
+    )
+    if c1.button("승인", key=f"wh_po_approve_{r['id']}"):
+        if not my_name.strip():
+            st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
+        else:
+            approve_warehouse_order(r["id"], my_name.strip())
+            st.rerun()
+    if c2.button("거절", key=f"wh_po_reject_{r['id']}"):
+        if not my_name.strip():
+            st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
+        else:
+            reject_warehouse_order(r["id"], my_name.strip())
+            st.rerun()
+
+
 # ---------------- 박스히어로(물류창고) 연동 ----------------
 # 박스히어로는 캠프와는 별개인 물류창고 시스템. 재고 수량/출고 이력만 제공한다.
 
@@ -998,6 +1120,65 @@ def render_trend_chart(df, x_col, y_col, height=220):
     return chart
 
 
+# ---------------- 로그인 ----------------
+# 개인별 계정이 아니라, 캠프 하나당 비밀번호 하나를 공유하는 가벼운 방식. 관리자는 별도
+# 마스터 비밀번호(secrets.toml)로 로그인해서 캠프 제한 없이 전체를 보고 캠프 비밀번호도 관리한다.
+
+def render_login():
+    st.markdown(
+        """
+        <div style="display:flex;align-items:center;gap:14px;margin:48px 0 28px;">
+            <div style="width:42px;height:42px;border-radius:50%;flex-shrink:0;
+                        background:linear-gradient(135deg, #6FA0FF, #4A6FE0);
+                        box-shadow:0 4px 16px rgba(74,111,224,0.45);
+                        display:flex;align-items:center;justify-content:center;">
+                <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="white"
+                     stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                    <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                    <line x1="12" y1="22.08" x2="12" y2="12"/>
+                </svg>
+            </div>
+            <div style="font-size:21px;font-weight:700;letter-spacing:-0.01em;">지바이크 SCM 대시보드</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    login_mode = st.radio("로그인 방식", ["캠프로 로그인", "관리자로 로그인"], horizontal=True)
+    with st.form("login_form"):
+        if login_mode == "캠프로 로그인":
+            camps = list_camp_credential_names()
+            camp = st.selectbox("캠프", camps) if camps else None
+            pin = st.text_input("비밀번호", type="password")
+            submitted = st.form_submit_button("로그인", type="primary", icon=":material/login:")
+            if submitted:
+                if not camps:
+                    st.error("등록된 캠프 계정이 없어요. 관리자에게 문의해주세요.", icon=":material/error:")
+                elif verify_password(pin, get_camp_password_hash(camp)):
+                    st.session_state["auth"] = {"role": "camp", "camp": camp}
+                    st.rerun()
+                else:
+                    st.error("비밀번호가 올바르지 않습니다.", icon=":material/error:")
+        else:
+            admin_pw = st.text_input("관리자 비밀번호", type="password")
+            submitted = st.form_submit_button("로그인", type="primary", icon=":material/login:")
+            if submitted:
+                try:
+                    correct = st.secrets["admin"]["password"]
+                except Exception:
+                    correct = None
+                if correct and admin_pw == correct:
+                    st.session_state["auth"] = {"role": "admin", "camp": None}
+                    st.rerun()
+                else:
+                    st.error("비밀번호가 올바르지 않습니다.", icon=":material/error:")
+
+
+if not st.session_state.get("auth"):
+    render_login()
+    st.stop()
+
+
 # ---------------- 세션 상태 로드 ----------------
 
 if "inventory" not in st.session_state:
@@ -1094,6 +1275,76 @@ st.divider()
 if not data:
     st.warning("아직 업로드된 재고 데이터가 없어요. 위에서 재고 엑셀을 업로드해주세요.", icon=":material/upload_file:")
     st.stop()
+
+
+# ---------------- 로그인 상태 / 내 캠프 알림 ----------------
+
+_login_accounts = data["campsOrder"] + ["물류창고"]
+
+auth = st.session_state["auth"]
+col_auth1, col_auth2 = st.columns([4, 1])
+with col_auth1:
+    if auth["role"] == "camp":
+        st.caption(f":material/lock: **{auth['camp']}**로 로그인됨")
+        my_camp = auth["camp"]
+    else:
+        st.caption(":material/lock: **관리자**로 로그인됨")
+        admin_view_camp = st.selectbox(
+            "캠프/창고로 보기 (알림 확인용)", ["선택 안 함"] + _login_accounts, key="admin_view_camp"
+        )
+        my_camp = admin_view_camp if admin_view_camp != "선택 안 함" else None
+with col_auth2:
+    if st.button("로그아웃", icon=":material/logout:"):
+        del st.session_state["auth"]
+        st.rerun()
+
+if my_camp == "물류창고":
+    try:
+        pending_df = list_pending_warehouse_orders()
+    except Exception:
+        pending_df = pd.DataFrame()
+    if not pending_df.empty:
+        st.warning(
+            f"**물류창고** 앞으로 승인 대기 중인 발주 요청이 **{len(pending_df)}건** 있어요. "
+            "아래에서 바로 승인/거절할 수 있어요.",
+            icon=":material/notifications_active:",
+        )
+        my_name_banner = st.text_input(
+            "내 이름", value=st.session_state.get("transfer_my_name", ""), key="banner_my_name_input"
+        )
+        st.session_state["transfer_my_name"] = my_name_banner
+        for _, r in pending_df.iterrows():
+            render_pending_warehouse_order_row(r, my_name_banner)
+elif my_camp:
+    try:
+        pending_df = list_pending_transfer_requests_for_camp(my_camp)
+    except Exception:
+        pending_df = pd.DataFrame()
+    if not pending_df.empty:
+        st.warning(
+            f"**{my_camp}** 앞으로 승인 대기 중인 이관 요청이 **{len(pending_df)}건** 있어요. "
+            "아래에서 바로 승인/거절할 수 있어요.",
+            icon=":material/notifications_active:",
+        )
+        my_name_banner = st.text_input(
+            "내 이름", value=st.session_state.get("transfer_my_name", ""), key="banner_my_name_input"
+        )
+        st.session_state["transfer_my_name"] = my_name_banner
+        for _, r in pending_df.iterrows():
+            render_pending_request_row(r, data, my_name_banner)
+
+if auth["role"] == "admin":
+    with st.expander("🔑 캠프/창고 비밀번호 관리 (관리자 전용)"):
+        pw_camp = st.selectbox("캠프/창고 선택", _login_accounts, key="admin_pw_camp")
+        new_pw = st.text_input("새 비밀번호", type="password", key="admin_pw_new")
+        if st.button("비밀번호 설정", key="admin_pw_set_btn"):
+            if new_pw.strip():
+                set_camp_password(pw_camp, new_pw.strip())
+                st.success(f"{pw_camp} 비밀번호를 설정했습니다.", icon=":material/check_circle:")
+            else:
+                st.error("비밀번호를 입력해주세요.", icon=":material/error:")
+
+st.divider()
 
 
 # ---------------- 파생 데이터 계산 ----------------
@@ -1466,37 +1717,7 @@ with tab_rebalance:
         if not requested_rows.empty:
             st.markdown("**요청중**")
             for _, r in requested_rows.iterrows():
-                c0, c1, c2, c3 = st.columns([1, 4, 1, 1])
-                c0.badge("요청중", icon=":material/schedule:", color="orange")
-                c1.write(f"{r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · 요청자: {r['requested_by']}")
-                if c2.button("승인", key=f"approve_{r['id']}"):
-                    if not my_name.strip():
-                        st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
-                    else:
-                        item = find_item_by_code(data, item_code)
-                        current_qty = item["x"].get(r["from_camp"], [0, 0])[0]
-                        already_out = int(
-                            req_df[
-                                (req_df["status"] == "in_transit") & (req_df["from_camp"] == r["from_camp"])
-                            ]["qty"].sum()
-                        )
-                        available = current_qty - already_out
-                        if available < r["qty"]:
-                            st.error(
-                                f"{r['from_camp']}의 가용재고가 부족합니다. "
-                                f"(가용 {available}개, 요청 {int(r['qty'])}개)",
-                                icon=":material/error:",
-                            )
-                        else:
-                            approve_transfer_request(r["id"], my_name.strip())
-                            st.success("승인했습니다. 이동중 상태로 전환됩니다.", icon=":material/task_alt:")
-                            st.rerun()
-                if c3.button("거절", key=f"reject_{r['id']}"):
-                    if not my_name.strip():
-                        st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
-                    else:
-                        reject_transfer_request(r["id"], my_name.strip())
-                        st.rerun()
+                render_pending_request_row(r, data, my_name)
 
         if not in_transit_rows.empty:
             st.markdown("**이동중**")

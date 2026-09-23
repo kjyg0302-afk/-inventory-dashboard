@@ -7,6 +7,14 @@ create table if not exists app_data (
     updated_at timestamptz not null default now()
 );
 
+-- 캠프별 로그인 비밀번호(PIN). 개인별 계정이 아니라 캠프 하나당 비밀번호 하나를 공유하는
+-- 가벼운 방식이라, 비밀번호는 그대로 저장하지 않고 salt+해시("salt$sha256digest")로 저장한다.
+create table if not exists camp_credentials (
+    camp text primary key,
+    password_hash text not null,
+    updated_at timestamptz not null default now()
+);
+
 -- 캠프 간 재고 이관 요청/승인/입고 처리 이력
 create table if not exists transfer_requests (
     id bigserial primary key,
