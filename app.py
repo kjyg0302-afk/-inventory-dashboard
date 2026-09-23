@@ -1550,20 +1550,15 @@ with tab_rebalance:
         else:
             st.caption("이 품목의 사용량 데이터가 아직 없습니다. (재고 수량만으로 비교합니다)")
 
-        display_df = df_rows.copy()
-        display_df["주 평균 사용량"] = display_df["주 평균 사용량"].apply(
-            lambda v: "-" if pd.isna(v) else f"{v:g}개/주"
-        )
-        display_df["소진 예상(주)"] = display_df["소진 예상(주)"].apply(
-            lambda v: "-" if pd.isna(v) else f"{v:g}주"
-        )
         st.dataframe(
-            display_df,
+            df_rows,
             hide_index=True,
             column_config={
                 "재고 수량": st.column_config.NumberColumn(format="%,d개"),
                 "가용재고": st.column_config.NumberColumn(format="%,d개"),
                 "이동중재고": st.column_config.NumberColumn(format="%,d개"),
+                "주 평균 사용량": st.column_config.NumberColumn(format="%.1f개/주"),
+                "소진 예상(주)": st.column_config.NumberColumn(format="%.1f주"),
             },
         )
 
@@ -2066,12 +2061,6 @@ with tab_total:
                 "주 사용량/예상 소진일은 캠프 사용량 엑셀 기준(전체 캠프 합산)이에요."
             )
             display_compare_df = compare_df.copy()
-            display_compare_df["주 사용량"] = display_compare_df["주 사용량"].apply(
-                lambda v: "-" if pd.isna(v) else f"{v:g}개/주"
-            )
-            display_compare_df["소진 예상(주)"] = display_compare_df["소진 예상(주)"].apply(
-                lambda v: "-" if pd.isna(v) else f"{v:g}주"
-            )
             display_compare_df["예상 소진일"] = display_compare_df["예상 소진일"].fillna("-")
             st.dataframe(
                 display_compare_df,
@@ -2081,6 +2070,8 @@ with tab_total:
                     "캠프 재고 수량": st.column_config.NumberColumn(format="%,d개"),
                     "합계 수량": st.column_config.NumberColumn(format="%,d개"),
                     "재고 금액": st.column_config.NumberColumn(format="₩%,d"),
+                    "주 사용량": st.column_config.NumberColumn(format="%.1f개/주"),
+                    "소진 예상(주)": st.column_config.NumberColumn(format="%.1f주"),
                 },
             )
 
@@ -2357,12 +2348,6 @@ with tab_warehouse:
                     | wh_df["SKU"].str.lower().str.contains(q, regex=False)
                 ]
             display_wh_df = wh_df.copy()
-            display_wh_df["주 사용량"] = display_wh_df["주 사용량"].apply(
-                lambda v: "-" if pd.isna(v) else f"{v:g}개/주"
-            )
-            display_wh_df["소진 예상(주)"] = display_wh_df["소진 예상(주)"].apply(
-                lambda v: "-" if pd.isna(v) else f"{v:g}주"
-            )
             display_wh_df["예상 소진일"] = display_wh_df["예상 소진일"].fillna("-")
             st.dataframe(
                 display_wh_df,
@@ -2371,6 +2356,8 @@ with tab_warehouse:
                     "재고 수량": st.column_config.NumberColumn(format="%,d개"),
                     "단가": st.column_config.NumberColumn(format="₩%,d"),
                     "재고 금액": st.column_config.NumberColumn(format="₩%,d"),
+                    "주 사용량": st.column_config.NumberColumn(format="%.1f개/주"),
+                    "소진 예상(주)": st.column_config.NumberColumn(format="%.1f주"),
                 },
             )
 
