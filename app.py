@@ -1148,13 +1148,13 @@ def boxhero_get(path, params=None):
 
 
 def boxhero_paginate(path, params=None, max_pages=50):
-    """cursor 기반 페이지네이션을 모두 순회해 items를 합쳐서 반환 (초당 5회 제한을 지키기 위해 살짝 대기)."""
+    """cursor 기반 페이지네이션을 모두 순회해 items를 합쳐서 반환.
+    박스히어로 자체 응답이 페이지당 0.7~1초 이상 걸려서 이미 초당 5회 제한보다 한참
+    느리기 때문에, 추가로 대기를 넣지 않는다 (예전엔 0.25초씩 더 기다렸는데 순수 낭비였음)."""
     params = dict(params or {})
     params.setdefault("limit", 100)
     all_items = []
     for i in range(max_pages):
-        if i > 0:
-            time.sleep(0.25)
         data = boxhero_get(path, params)
         all_items.extend(data.get("items", []))
         if not data.get("has_more"):
