@@ -1852,8 +1852,14 @@ with tab_rebalance:
     selected = None
     if query.strip():
         q = query.strip().lower()
-        candidates = [it for it in data["items"] if q in it["n"].lower() or q in str(it["c"]).lower()][:8]
+        all_candidates = [it for it in data["items"] if q in it["n"].lower() or q in str(it["c"]).lower()]
+        candidates = all_candidates[:15]
         if candidates:
+            if len(all_candidates) > len(candidates):
+                st.caption(
+                    f"검색 결과 {len(all_candidates)}건 중 상위 {len(candidates)}개만 표시했어요. "
+                    "검색어를 더 구체적으로 입력하면 찾는 품목이 더 잘 보여요."
+                )
             options = {f"{it['n']} ({it['c']})": it for it in candidates}
             picked_label = st.radio("검색 결과", list(options.keys()), index=0)
             selected = options[picked_label]
@@ -2163,10 +2169,16 @@ with tab_usage_amount:
                 sku_query = st.text_input("SKU 또는 품명으로 검색해서 월별 추이 보기", "", key="usage_sku_query")
                 if sku_query.strip():
                     q = sku_query.strip().lower()
-                    candidates = [
+                    all_candidates = [
                         s for s in sku_totals["SKU"] if q in s.lower() or q in str(sku_names.get(s, "")).lower()
-                    ][:8]
+                    ]
+                    candidates = all_candidates[:15]
                     if candidates:
+                        if len(all_candidates) > len(candidates):
+                            st.caption(
+                                f"검색 결과 {len(all_candidates)}건 중 상위 {len(candidates)}개만 표시했어요. "
+                                "검색어를 더 구체적으로 입력하면 찾는 품목이 더 잘 보여요."
+                            )
                         labels = {f"{s} · {sku_names.get(s, '-')}": s for s in candidates}
                         picked_label = st.radio("검색 결과", list(labels.keys()), key="usage_sku_radio")
                         picked_sku = labels[picked_label]
@@ -2718,8 +2730,14 @@ with tab_purchase:
     po_selected = None
     if po_query.strip():
         q = po_query.strip().lower()
-        po_candidates = [it for it in data["items"] if q in it["n"].lower() or q in str(it["c"]).lower()][:8]
+        all_po_candidates = [it for it in data["items"] if q in it["n"].lower() or q in str(it["c"]).lower()]
+        po_candidates = all_po_candidates[:15]
         if po_candidates:
+            if len(all_po_candidates) > len(po_candidates):
+                st.caption(
+                    f"검색 결과 {len(all_po_candidates)}건 중 상위 {len(po_candidates)}개만 표시했어요. "
+                    "검색어를 더 구체적으로 입력하면 찾는 품목이 더 잘 보여요."
+                )
             po_options = {f"{it['n']} ({it['c']})": it for it in po_candidates}
             po_picked_label = st.radio("검색 결과", list(po_options.keys()), key="po_radio")
             po_selected = po_options[po_picked_label]
