@@ -1164,6 +1164,47 @@ def fetch_boxhero_items():
     return boxhero_paginate("/items")
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def get_boxhero_name_map():
+    """SKU -> 박스히어로 품명 매핑. 박스히어로를 품명의 1차 기준으로 삼아서, 재고(태블로/엑셀)와
+    사용량(엑셀) 쪽 품명이 서로 다르게 적혀 있어도 저장 시점에 이 매핑으로 통일한다."""
+    if not get_boxhero_token():
+        return {}
+    try:
+        items = fetch_boxhero_items()
+    except Exception:
+        return {}
+    return {it["sku"].strip().upper(): it["name"] for it in items if it.get("sku") and it.get("name")}
+
+
+def apply_boxhero_names_to_inventory(parsed):
+    """parse_inventory_excel/fetch_tableau_inventory 결과의 품명을 박스히어로 기준으로 덮어쓴다."""
+    name_map = get_boxhero_name_map()
+    if name_map:
+        for it in parsed["items"]:
+            code = str(it.get("c") or "").strip().upper()
+            if code in name_map:
+                it["n"] = name_map[code]
+    return parsed
+
+
+def apply_boxhero_names_to_usage(parsed_usage, facts_df=None):
+    """parse_usage_excel 결과(skuNames)와 facts_df의 품명을 박스히어로 기준으로 덮어쓴다."""
+    name_map = get_boxhero_name_map()
+    if name_map:
+        sku_names = parsed_usage.get("skuNames") or {}
+        for code in list(sku_names.keys()):
+            code_u = str(code).strip().upper()
+            if code_u in name_map:
+                sku_names[code] = name_map[code_u]
+        parsed_usage["skuNames"] = sku_names
+        if facts_df is not None and not facts_df.empty:
+            facts_df["item_name"] = facts_df["item_code"].astype(str).str.strip().str.upper().map(name_map).combine_first(
+                facts_df["item_name"]
+            )
+    return parsed_usage, facts_df
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_boxhero_recent_out_transactions(days=30):
     """최근 days일 이내의 출고 트랜잭션을 가져온다 (최신순이라 기간을 벗어나면 즉시 중단).
@@ -1391,6 +1432,7 @@ with col_upload1:
     if inv_file is not None and st.session_state.get("_inv_file_id") != inv_file.file_id:
         try:
             parsed = parse_inventory_excel(inv_file)
+            parsed = apply_boxhero_names_to_inventory(parsed)
             save_data("inventory", parsed)
             st.session_state.inventory = parsed
             data = parsed
@@ -1404,6 +1446,7 @@ with col_upload1:
             try:
                 with st.spinner("태블로에서 재고 데이터를 받아오는 중이에요..."):
                     parsed = fetch_tableau_inventory()
+                parsed = apply_boxhero_names_to_inventory(parsed)
                 save_data("inventory", parsed)
                 st.session_state.inventory = parsed
                 data = parsed
@@ -1422,9 +1465,11 @@ with col_upload2:
                     parsed_usage = json.load(usage_file)
                     if "items" not in parsed_usage:
                         raise ValueError("사용량 JSON 형식이 올바르지 않습니다.")
+                    parsed_usage, _ = apply_boxhero_names_to_usage(parsed_usage)
                 else:
                     parsed_usage = parse_usage_excel(usage_file)
                     facts_df = parsed_usage.pop("facts")
+                    parsed_usage, facts_df = apply_boxhero_names_to_usage(parsed_usage, facts_df)
                     save_usage_facts(facts_df)
                 save_data("usage", parsed_usage)
             st.session_state.usage = parsed_usage
