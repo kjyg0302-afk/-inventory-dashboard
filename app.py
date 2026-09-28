@@ -890,6 +890,37 @@ def load_category_monthly_usage(item_codes):
     )
 
 
+def load_recent_monthly_usage_by_sku(item_codes, months=3):
+    """SKU별 최근 N개월(이번 달 제외) 평균 사용 수량 (전체 캠프 합산, usage_facts 기준)."""
+    if not item_codes:
+        return pd.DataFrame(columns=["item_code", "avg_qty"])
+    conn = get_db_connection()
+    now = datetime.now()
+    sql = """
+        with recent_months as (
+            select distinct year, month from usage_facts
+            where (year, month) < (:cur_year, :cur_month)
+            order by year desc, month desc
+            limit :months
+        ),
+        scoped as (
+            select f.item_code, f.year, f.month, sum(f.qty) as month_qty
+            from usage_facts f
+            join recent_months rm on f.year = rm.year and f.month = rm.month
+            where f.item_code = any(:codes)
+            group by f.item_code, f.year, f.month
+        )
+        select item_code, round(sum(month_qty) / count(*), 1) as avg_qty
+        from scoped
+        group by item_code
+    """
+    return conn.query(
+        sql,
+        params={"cur_year": now.year, "cur_month": now.month, "months": months, "codes": item_codes},
+        ttl=30,
+    )
+
+
 def save_demand_forecasts(rows):
     """rows: camp/item_code/item_name/forecast_year/forecast_month/predicted_qty/historical_avg_qty/entered_by
     딕셔너리 리스트. 같은 (캠프,품목,연,월) 조합이면 덮어쓴다."""
@@ -2272,20 +2303,58 @@ with tab_category:
             )
 
         st.subheader("SKU별 상세")
-        detail_rows = [
-            {"SKU": it["c"], "품명": it["n"], "재고 수량": it["q"], "재고 금액": it["a"]} for it in matched_items
-        ]
-        detail_rows += [
-            {"SKU": code, "품명": "(재고 데이터에 없음)", "재고 수량": 0, "재고 금액": 0} for code in unmatched_codes
-        ]
+        try:
+            monthly_usage_df = load_recent_monthly_usage_by_sku(cat_codes)
+            monthly_usage_map = dict(zip(monthly_usage_df["item_code"], monthly_usage_df["avg_qty"]))
+        except Exception:
+            monthly_usage_map = {}
+
+        detail_rows = []
+        for it in matched_items:
+            avg_qty = monthly_usage_map.get(it["c"])
+            months_left = (it["q"] / avg_qty) if avg_qty and avg_qty > 0 and it["q"] > 0 else None
+            depletion_date = (
+                (datetime.now() + timedelta(days=months_left * 30.44)).date() if months_left is not None else None
+            )
+            detail_rows.append(
+                {
+                    "SKU": it["c"],
+                    "품명": it["n"],
+                    "재고 수량": it["q"],
+                    "재고 금액": it["a"],
+                    "월 사용수량": avg_qty,
+                    "소진 예상(개월)": round(months_left, 1) if months_left is not None else None,
+                    "예상 소진일": depletion_date.isoformat() if depletion_date else None,
+                }
+            )
+        for code in unmatched_codes:
+            detail_rows.append(
+                {
+                    "SKU": code,
+                    "품명": "(재고 데이터에 없음)",
+                    "재고 수량": 0,
+                    "재고 금액": 0,
+                    "월 사용수량": monthly_usage_map.get(code),
+                    "소진 예상(개월)": None,
+                    "예상 소진일": None,
+                }
+            )
         detail_df = pd.DataFrame(detail_rows).sort_values("재고 금액", ascending=False)
+        display_detail_df = detail_df.copy()
+        display_detail_df["예상 소진일"] = display_detail_df["예상 소진일"].fillna("-")
         st.dataframe(
-            detail_df,
+            display_detail_df,
             hide_index=True,
             column_config={
                 "재고 수량": st.column_config.NumberColumn(format="%,d개"),
                 "재고 금액": st.column_config.NumberColumn(format="₩%,d"),
+                "월 사용수량": st.column_config.NumberColumn(format="%.1f개"),
+                "소진 예상(개월)": st.column_config.NumberColumn(format="%.1f개월"),
             },
+        )
+        st.caption(
+            "월 사용수량은 최근 3개월(이번 달 제외) 전체 캠프 합산 평균이에요. "
+            "소진 예상은 현재 재고 수량 ÷ 월 사용수량 기준의 단순 추정이라 실제와 다를 수 있어요."
         )
 
 with tab_forecast:
