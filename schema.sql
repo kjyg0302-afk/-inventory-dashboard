@@ -139,3 +139,16 @@ create table if not exists inventory_value_snapshots (
 create index if not exists idx_inv_value_snap_period on inventory_value_snapshots (year, week);
 create index if not exists idx_inv_value_snap_item on inventory_value_snapshots (item_code);
 create index if not exists idx_inv_value_snap_source on inventory_value_snapshots (source, year, week);
+
+-- SKU를 임의의 카테고리로 묶어서 관리 (예: "킥보드 단종 예정"). 카테고리 하나에 SKU 여러 개가
+-- 속하고, 이 매핑을 기준으로 재고 금액/월 사용 금액을 따로 모아 볼 수 있다.
+create table if not exists sku_categories (
+    id bigserial primary key,
+    category text not null,
+    item_code text not null,
+    created_at timestamptz not null default now(),
+    unique (category, item_code)
+);
+
+create index if not exists idx_sku_categories_category on sku_categories (category);
+create index if not exists idx_sku_categories_item on sku_categories (item_code);

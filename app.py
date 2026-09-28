@@ -429,6 +429,42 @@ def set_camp_password(camp, password):
         session.commit()
 
 
+# ---------------- SKU 카테고리 (임의로 SKU 묶음을 만들어 재고/사용 금액을 따로 본다) ----------------
+
+def list_categories():
+    conn = get_db_connection()
+    df = conn.query("select distinct category from sku_categories order by category", ttl=10)
+    return df["category"].tolist()
+
+
+def list_category_items(category):
+    conn = get_db_connection()
+    df = conn.query(
+        "select item_code from sku_categories where category = :c order by item_code",
+        params={"c": category},
+        ttl=10,
+    )
+    return df["item_code"].tolist()
+
+
+def save_category_items(category, item_codes):
+    """category에 속하는 SKU 목록을 통째로 새로 채운다 (기존 목록은 지우고 새로 넣음)."""
+    conn = get_db_connection()
+    engine = conn.session.get_bind()
+    df = pd.DataFrame({"category": category, "item_code": sorted(set(item_codes))})
+    with engine.begin() as connection:
+        connection.execute(text("delete from sku_categories where category = :c"), {"c": category})
+        if not df.empty:
+            df.to_sql("sku_categories", con=connection, if_exists="append", index=False, method="multi")
+
+
+def delete_category(category):
+    conn = get_db_connection()
+    with conn.session as session:
+        session.execute(text("delete from sku_categories where category = :c"), {"c": category})
+        session.commit()
+
+
 def load_data(key):
     """app_data 테이블에서 key에 해당하는 JSON 데이터를 읽어온다. 없으면 None."""
     conn = get_db_connection()
@@ -833,6 +869,24 @@ def top_camp_items_recent(camp, limit=30):
     """
     return conn.query(
         sql, params={"cur_year": now.year, "cur_month": now.month, "camp": camp, "limit": limit}, ttl=0
+    )
+
+
+def load_category_monthly_usage(item_codes):
+    """SKU 목록(카테고리)에 대한 월별 사용 수량/금액 합계 (usage_facts 기준)."""
+    if not item_codes:
+        return pd.DataFrame(columns=["year", "month", "qty", "amt"])
+    conn = get_db_connection()
+    return conn.query(
+        """
+        select year, month, sum(qty) as qty, sum(amt) as amt
+        from usage_facts
+        where item_code = any(:codes)
+        group by year, month
+        order by year, month
+        """,
+        params={"codes": item_codes},
+        ttl=30,
     )
 
 
@@ -1523,7 +1577,7 @@ def estimate_depletion(qty, code):
 
 (
     tab_overview, tab_camps, tab_items, tab_rebalance, tab_usage_amount,
-    tab_forecast, tab_warehouse, tab_purchase, tab_total,
+    tab_category, tab_forecast, tab_warehouse, tab_purchase, tab_total,
 ) = st.tabs(
     [
         ":material/dashboard: 개요",
@@ -1531,6 +1585,7 @@ def estimate_depletion(qty, code):
         ":material/search: 품목 검색",
         ":material/sync_alt: 재분배 도우미",
         ":material/payments: 월별 사용 금액",
+        ":material/category: 카테고리별 현황",
         ":material/query_stats: 수요 예측",
         ":material/warehouse: 창고 현황",
         ":material/local_shipping: 발주 요청",
@@ -2116,6 +2171,122 @@ with tab_usage_amount:
                         "월평균 사용금액": st.column_config.NumberColumn(format="₩%,d"),
                     },
                 )
+
+with tab_category:
+    st.caption(
+        "임의로 SKU들을 묶어서 재고 금액과 월별 사용 금액을 따로 확인할 수 있어요 "
+        "(예: 단종 예정 부품, 특정 모델 전용 부품 등)."
+    )
+
+    if auth["role"] == "admin":
+        with st.expander("📁 카테고리 관리 (관리자 전용)"):
+            existing_categories = list_categories()
+            cat_admin_action = st.radio(
+                "작업", ["만들기 / 수정", "삭제"], horizontal=True, key="cat_admin_action"
+            )
+            if cat_admin_action == "만들기 / 수정":
+                cat_pick = st.selectbox(
+                    "카테고리 선택 또는 새로 만들기", ["(새 카테고리)"] + existing_categories, key="cat_admin_pick"
+                )
+                if cat_pick == "(새 카테고리)":
+                    cat_name_input = st.text_input("카테고리 이름", key="cat_admin_new_name")
+                    default_codes = ""
+                else:
+                    cat_name_input = cat_pick
+                    default_codes = "\n".join(list_category_items(cat_pick))
+                codes_text = st.text_area(
+                    "SKU 목록 (한 줄에 하나씩 붙여넣으세요)", value=default_codes, height=200, key="cat_admin_codes"
+                )
+                if st.button("저장", type="primary", icon=":material/save:", key="cat_admin_save_btn"):
+                    name = cat_name_input.strip()
+                    codes = [c.strip() for c in codes_text.splitlines() if c.strip()]
+                    if not name:
+                        st.error("카테고리 이름을 입력해주세요.", icon=":material/error:")
+                    elif not codes:
+                        st.error("SKU를 한 개 이상 입력해주세요.", icon=":material/error:")
+                    else:
+                        save_category_items(name, codes)
+                        st.success(
+                            f"'{name}' 카테고리에 SKU {len(set(codes))}개를 저장했습니다.",
+                            icon=":material/check_circle:",
+                        )
+                        st.rerun()
+            else:
+                if existing_categories:
+                    del_pick = st.selectbox("삭제할 카테고리", existing_categories, key="cat_admin_del_pick")
+                    if st.button("삭제", icon=":material/delete:", key="cat_admin_del_btn"):
+                        delete_category(del_pick)
+                        st.success(f"'{del_pick}' 카테고리를 삭제했습니다.", icon=":material/check_circle:")
+                        st.rerun()
+                else:
+                    st.caption("삭제할 카테고리가 없어요.")
+
+    categories = list_categories()
+    if not categories:
+        st.info("아직 만들어진 카테고리가 없어요. 관리자가 위 패널에서 만들 수 있어요.", icon=":material/category:")
+    else:
+        view_cat = st.selectbox("카테고리 선택", categories, key="cat_view_pick")
+        cat_codes = list_category_items(view_cat)
+        cat_code_set = set(cat_codes)
+        matched_items = [it for it in data["items"] if it.get("c") in cat_code_set]
+        matched_codes = {it["c"] for it in matched_items}
+        unmatched_codes = cat_code_set - matched_codes
+
+        total_qty = sum(it["q"] for it in matched_items)
+        total_amt = sum(it["a"] for it in matched_items)
+
+        k1, k2, k3 = st.columns(3)
+        k1.metric("SKU 수", f"{len(cat_codes)}개", border=True)
+        k2.metric("캠프 재고 수량", f"{fmt_int(total_qty)}개", border=True)
+        k3.metric("캠프 재고 금액", fmt_won(total_amt), border=True)
+        if unmatched_codes:
+            st.caption(
+                f":material/warning: 현재 재고 데이터에서 찾을 수 없는 SKU {len(unmatched_codes)}개가 있어요 "
+                "(품목 코드를 다시 확인해주세요)."
+            )
+
+        st.subheader("월별 사용 금액 추이")
+        try:
+            usage_trend_df = load_category_monthly_usage(cat_codes)
+        except Exception as e:
+            usage_trend_df = pd.DataFrame()
+            st.error(f"사용량 데이터를 불러오는 중 문제가 발생했습니다: {e}", icon=":material/error:")
+        if usage_trend_df.empty:
+            st.caption("이 카테고리에 대한 사용량 데이터가 없어요.")
+        else:
+            usage_trend_df = usage_trend_df.copy()
+            usage_trend_df["월"] = (
+                usage_trend_df["year"].astype(str) + "-" + usage_trend_df["month"].astype(str).str.zfill(2)
+            )
+            chart_df = usage_trend_df[["월", "amt"]].rename(columns={"amt": "사용 금액"})
+            st.altair_chart(render_trend_chart(chart_df, "월", "사용 금액"), width="stretch")
+            st.dataframe(
+                usage_trend_df[["월", "qty", "amt"]]
+                .rename(columns={"qty": "사용 수량", "amt": "사용 금액"})
+                .sort_values("월", ascending=False),
+                hide_index=True,
+                column_config={
+                    "사용 수량": st.column_config.NumberColumn(format="%,d개"),
+                    "사용 금액": st.column_config.NumberColumn(format="₩%,d"),
+                },
+            )
+
+        st.subheader("SKU별 상세")
+        detail_rows = [
+            {"SKU": it["c"], "품명": it["n"], "재고 수량": it["q"], "재고 금액": it["a"]} for it in matched_items
+        ]
+        detail_rows += [
+            {"SKU": code, "품명": "(재고 데이터에 없음)", "재고 수량": 0, "재고 금액": 0} for code in unmatched_codes
+        ]
+        detail_df = pd.DataFrame(detail_rows).sort_values("재고 금액", ascending=False)
+        st.dataframe(
+            detail_df,
+            hide_index=True,
+            column_config={
+                "재고 수량": st.column_config.NumberColumn(format="%,d개"),
+                "재고 금액": st.column_config.NumberColumn(format="₩%,d"),
+            },
+        )
 
 with tab_forecast:
     st.caption(
