@@ -2909,10 +2909,13 @@ with tab_warehouse:
                 "창고 재고 금액은 원가(cost) 입력이 대부분 비어있어 판매가(price) 기준으로 계산했어요."
             )
 
-            try:
-                save_warehouse_snapshot(warehouse_qty, warehouse_amt, len(wh_items))
-            except Exception:
-                pass  # 스냅샷 저장에 실패해도 화면 표시는 계속 진행
+            _today_str = datetime.now().date().isoformat()
+            if st.session_state.get("_wh_snap_date") != _today_str:
+                try:
+                    save_warehouse_snapshot(warehouse_qty, warehouse_amt, len(wh_items))
+                    st.session_state["_wh_snap_date"] = _today_str
+                except Exception:
+                    pass  # 스냅샷 저장에 실패해도 화면 표시는 계속 진행
 
             _cur_period_label = current_inventory_period()[2]
             if st.session_state.get("_wh_value_snap_period") != _cur_period_label:
