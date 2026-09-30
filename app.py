@@ -1671,7 +1671,7 @@ def estimate_depletion(qty, code):
         ":material/sync_alt: 재고이관(캠프<>캠프)",
         ":material/payments: 월별 사용 금액",
         ":material/category: 카테고리별 현황",
-        ":material/query_stats: 수요 예측",
+        ":material/query_stats: FORECAST",
         ":material/warehouse: 창고 현황",
         ":material/local_shipping: 재고이관(창고<>캠프)",
         ":material/inventory: 지바이크 전체 재고",
