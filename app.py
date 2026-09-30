@@ -1668,12 +1668,12 @@ def estimate_depletion(qty, code):
         ":material/dashboard: 개요",
         ":material/location_on: 캠프별 현황",
         ":material/search: 품목 검색",
-        ":material/sync_alt: 재분배 도우미",
+        ":material/sync_alt: 재고이관(캠프<>캠프)",
         ":material/payments: 월별 사용 금액",
         ":material/category: 카테고리별 현황",
         ":material/query_stats: 수요 예측",
         ":material/warehouse: 창고 현황",
-        ":material/local_shipping: 발주 요청",
+        ":material/local_shipping: 재고이관(창고<>캠프)",
         ":material/inventory: 지바이크 전체 재고",
     ]
 )
