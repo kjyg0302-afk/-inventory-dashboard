@@ -446,18 +446,20 @@ def set_camp_password(camp, password):
 
 # ---------------- SKU 카테고리 (임의로 SKU 묶음을 만들어 재고/사용 금액을 따로 본다) ----------------
 
+@st.cache_data(ttl=30)
 def list_categories():
     conn = get_db_connection()
-    df = conn.query("select distinct category from sku_categories order by category", ttl=10)
+    df = conn.query("select distinct category from sku_categories order by category", ttl=0)
     return df["category"].tolist()
 
 
+@st.cache_data(ttl=30)
 def list_category_items(category):
     conn = get_db_connection()
     df = conn.query(
         "select item_code from sku_categories where category = :c order by item_code",
         params={"c": category},
-        ttl=10,
+        ttl=0,
     )
     return df["item_code"].tolist()
 
@@ -506,11 +508,12 @@ def save_data(key, obj):
         session.commit()
 
 
+@st.cache_data(ttl=30)
 def load_camp_tab_permissions():
     """캠프/물류창고 로그인이 볼 수 있는 탭 키 목록. 없으면 기본값(재고이관 2개).
     로그인한 사람이 뭘 누르든 매 rerun마다 도는 조회라 짧게 캐시한다."""
     conn = get_db_connection()
-    df = conn.query("select data from app_data where key = 'camp_tab_permissions'", ttl=30)
+    df = conn.query("select data from app_data where key = 'camp_tab_permissions'", ttl=0)
     if not df.empty:
         perms = df.iloc[0]["data"]
         if isinstance(perms, list) and perms:
@@ -531,15 +534,17 @@ def save_usage_facts(facts_df):
         facts_df.to_sql("usage_facts", con=connection, if_exists="append", index=False, method="multi", chunksize=1000)
 
 
+@st.cache_data(ttl=15)
 def list_transfer_requests(item_code):
     """특정 품목의 이관 요청 이력을 최신순으로 반환.
     재분배 도우미 탭이 열려있으면(품목 선택 상태가 세션에 남아있으면) 다른 탭에서 뭘 눌러도
-    매 rerun마다 이 쿼리가 도는 구조라 짧게라도 캐시한다 (쓰기 직후에는 캐시를 지워서 새로고침)."""
+    매 rerun마다 이 쿼리가 도는 구조라 짧게라도 캐시한다 (쓰기 직후에는 이 함수만 .clear()로
+    지워서 새로고침 — 박스히어로 캐시처럼 관련 없는 캐시까지 같이 지우지 않기 위해)."""
     conn = get_db_connection()
     return conn.query(
         "select * from transfer_requests where item_code = :item_code order by requested_at desc",
         params={"item_code": item_code},
-        ttl=15,
+        ttl=0,
     )
 
 
@@ -767,11 +772,12 @@ def load_inventory_value_trend():
     )
 
 
+@st.cache_data(ttl=15)
 def list_warehouse_orders():
     """전체 발주 요청 이력을 최신순으로 반환. 발주 요청 탭이 열려있는 동안 매 rerun마다
-    도는 쿼리라 짧게 캐시한다 (쓰기 직후에는 캐시를 지워서 새로고침)."""
+    도는 쿼리라 짧게 캐시한다 (쓰기 직후에는 이 함수만 .clear()로 지워서 새로고침)."""
     conn = get_db_connection()
-    return conn.query("select * from warehouse_orders order by requested_at desc", ttl=15)
+    return conn.query("select * from warehouse_orders order by requested_at desc", ttl=0)
 
 
 def list_pending_warehouse_orders():
@@ -982,15 +988,17 @@ def save_demand_forecasts(rows):
         session.commit()
 
 
+@st.cache_data(ttl=15)
 def load_demand_forecasts(camp, year, month):
     conn = get_db_connection()
     return conn.query(
         "select * from demand_forecasts where camp = :camp and forecast_year = :year and forecast_month = :month",
         params={"camp": camp, "year": year, "month": month},
-        ttl=15,
+        ttl=0,
     )
 
 
+@st.cache_data(ttl=15)
 def list_demand_forecasts(camp=None):
     conn = get_db_connection()
     if camp:
@@ -998,11 +1006,11 @@ def list_demand_forecasts(camp=None):
             "select * from demand_forecasts where camp = :camp "
             "order by forecast_year desc, forecast_month desc, item_code",
             params={"camp": camp},
-            ttl=15,
+            ttl=0,
         )
     return conn.query(
         "select * from demand_forecasts order by forecast_year desc, forecast_month desc, camp, item_code",
-        ttl=15,
+        ttl=0,
     )
 
 
@@ -1068,14 +1076,14 @@ def render_pending_request_row(r, data, my_name, key_prefix=""):
             else:
                 approve_transfer_request(r["id"], my_name.strip())
                 st.success("승인했습니다. 이동중 상태로 전환됩니다.", icon=":material/task_alt:")
-                st.cache_data.clear()
+                list_transfer_requests.clear()
                 st.rerun()
     if c3.button("거절", key=f"{key_prefix}reject_{r['id']}"):
         if not my_name.strip():
             st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
         else:
             reject_transfer_request(r["id"], my_name.strip())
-            st.cache_data.clear()
+            list_transfer_requests.clear()
             st.rerun()
 
 
@@ -1099,7 +1107,7 @@ def render_in_transit_request_row(r, data, my_name, key_prefix=""):
                 save_data("inventory", data)
                 complete_transfer_request(r["id"], my_name.strip(), moved_amt)
                 st.success("입고 완료 처리했습니다.", icon=":material/inventory_2:")
-                st.cache_data.clear()
+                list_transfer_requests.clear()
                 st.rerun()
 
 
@@ -1116,14 +1124,14 @@ def render_pending_warehouse_order_row(r, my_name, key_prefix=""):
             st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
         else:
             approve_warehouse_order(r["id"], my_name.strip())
-            st.cache_data.clear()
+            list_warehouse_orders.clear()
             st.rerun()
     if c2.button("거절", key=f"{key_prefix}wh_po_reject_{r['id']}"):
         if not my_name.strip():
             st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
         else:
             reject_warehouse_order(r["id"], my_name.strip())
-            st.cache_data.clear()
+            list_warehouse_orders.clear()
             st.rerun()
 
 
@@ -1149,7 +1157,7 @@ def render_incoming_warehouse_order_row(r, data, my_name, key_prefix=""):
                 save_data("inventory", data)
                 complete_warehouse_order(r["id"], my_name.strip(), amt)
                 st.success("입고 완료 처리했습니다.", icon=":material/inventory_2:")
-                st.cache_data.clear()
+                list_warehouse_orders.clear()
                 st.rerun()
 
 
@@ -1194,17 +1202,20 @@ def boxhero_paginate(path, params=None, max_pages=50):
     return all_items
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def fetch_boxhero_locations():
     return boxhero_paginate("/locations")
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def fetch_boxhero_items():
+    # 856개 기준 페이지네이션에 8초 가까이 걸려서, 캐시 만료 주기를 5분 -> 15분으로
+    # 늘려 그 비용을 덜 자주 물게 한다 (물류창고 실물 재고가 몇 분 단위로 바뀌진 않아서
+    # 신선도를 조금 희생해도 괜찮은 트레이드오프).
     return boxhero_paginate("/items")
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def get_boxhero_name_map():
     """SKU -> 박스히어로 품명 매핑. 박스히어로를 품명의 1차 기준으로 삼아서, 재고(태블로/엑셀)와
     사용량(엑셀) 쪽 품명이 서로 다르게 적혀 있어도 저장 시점에 이 매핑으로 통일한다."""
@@ -1647,7 +1658,7 @@ if auth["role"] == "admin":
             else:
                 save_camp_tab_permissions(new_tab_perms)
                 st.success("캠프/창고 탭 권한을 저장했습니다.", icon=":material/check_circle:")
-                st.cache_data.clear()
+                load_camp_tab_permissions.clear()
                 st.rerun()
 
 st.divider()
@@ -2021,7 +2032,7 @@ if "rebalance" in tabs:
                             item_code, selected["n"], from_camp_sel, to_camp_sel, int(qty_sel), my_name.strip()
                         )
                         st.success("이관 요청을 등록했습니다.", icon=":material/send:")
-                        st.cache_data.clear()
+                        list_transfer_requests.clear()
                         st.rerun()
 
             req_df = list_transfer_requests(item_code)
@@ -2362,7 +2373,8 @@ if "category" in tabs:
                                 f"'{name}' 카테고리에 SKU {len(set(codes))}개를 저장했습니다.",
                                 icon=":material/check_circle:",
                             )
-                            st.cache_data.clear()
+                            list_categories.clear()
+                            list_category_items.clear()
                             st.rerun()
                 else:
                     if existing_categories:
@@ -2370,7 +2382,8 @@ if "category" in tabs:
                         if st.button("삭제", icon=":material/delete:", key="cat_admin_del_btn"):
                             delete_category(del_pick)
                             st.success(f"'{del_pick}' 카테고리를 삭제했습니다.", icon=":material/check_circle:")
-                            st.cache_data.clear()
+                            list_categories.clear()
+                            list_category_items.clear()
                             st.rerun()
                     else:
                         st.caption("삭제할 카테고리가 없어요.")
@@ -2577,7 +2590,8 @@ if "forecast" in tabs:
                             f"{fc_camp} {fc_month_label} 예측 {len(save_rows)}건을 저장했습니다.",
                             icon=":material/check_circle:",
                         )
-                        st.cache_data.clear()
+                        load_demand_forecasts.clear()
+                        list_demand_forecasts.clear()
                         st.rerun()
 
         st.subheader("저장된 예측 이력")
@@ -2879,7 +2893,7 @@ if "purchase" in tabs:
                         )
                     st.session_state["po_cart"] = []
                     st.success("발주 요청을 모두 등록했습니다.", icon=":material/send:")
-                    st.cache_data.clear()
+                    list_warehouse_orders.clear()
                     st.rerun()
 
         po_df = list_warehouse_orders()
@@ -2908,14 +2922,14 @@ if "purchase" in tabs:
                             st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
                         else:
                             approve_warehouse_order(r["id"], po_my_name.strip())
-                            st.cache_data.clear()
+                            list_warehouse_orders.clear()
                             st.rerun()
                     if c4.button("거절", key=f"po_reject_{r['id']}"):
                         if not po_my_name.strip():
                             st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
                         else:
                             reject_warehouse_order(r["id"], po_my_name.strip())
-                            st.cache_data.clear()
+                            list_warehouse_orders.clear()
                             st.rerun()
 
                 po_bulk_ids = [
@@ -2932,7 +2946,7 @@ if "purchase" in tabs:
                             for oid in po_bulk_ids:
                                 approve_warehouse_order(oid, po_my_name.strip())
                             st.success(f"{len(po_bulk_ids)}건을 일괄 승인했습니다.", icon=":material/done_all:")
-                            st.cache_data.clear()
+                            list_warehouse_orders.clear()
                             st.rerun()
             else:
                 # 승인/거절은 물류창고(또는 관리자)만 할 수 있어서, 캠프 로그인에는 진행 상황만 보여준다.
