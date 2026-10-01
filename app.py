@@ -510,8 +510,8 @@ def save_data(key, obj):
 
 @st.cache_data(ttl=30)
 def load_camp_tab_permissions():
-    """캠프/물류창고 로그인이 볼 수 있는 탭 키 목록. 없으면 기본값(재고이관 2개).
-    로그인한 사람이 뭘 누르든 매 rerun마다 도는 조회라 짧게 캐시한다."""
+    """일반 캠프 로그인이 볼 수 있는 탭 키 목록 (물류창고는 별도, load_warehouse_tab_permissions).
+    없으면 기본값(재고이관 2개). 로그인한 사람이 뭘 누르든 매 rerun마다 도는 조회라 짧게 캐시한다."""
     conn = get_db_connection()
     df = conn.query("select data from app_data where key = 'camp_tab_permissions'", ttl=0)
     if not df.empty:
@@ -523,6 +523,23 @@ def load_camp_tab_permissions():
 
 def save_camp_tab_permissions(keys):
     save_data("camp_tab_permissions", keys)
+
+
+@st.cache_data(ttl=30)
+def load_warehouse_tab_permissions():
+    """물류창고 로그인이 볼 수 있는 탭 키 목록. 일반 캠프와 권한을 따로 관리하려고 분리함.
+    없으면 기본값(재고이관(창고<>캠프), 창고 현황)."""
+    conn = get_db_connection()
+    df = conn.query("select data from app_data where key = 'warehouse_tab_permissions'", ttl=0)
+    if not df.empty:
+        perms = df.iloc[0]["data"]
+        if isinstance(perms, list) and perms:
+            return perms
+    return ["purchase", "warehouse"]
+
+
+def save_warehouse_tab_permissions(keys):
+    save_data("warehouse_tab_permissions", keys)
 
 
 def save_usage_facts(facts_df):
@@ -1641,8 +1658,8 @@ if auth["role"] == "admin":
             else:
                 st.error("비밀번호를 입력해주세요.", icon=":material/error:")
 
-    with st.expander("🔐 캠프/창고 화면(탭) 권한 관리 (관리자 전용)"):
-        st.caption("캠프 또는 물류창고로 로그인했을 때 보이는 탭을 선택하세요. 관리자는 항상 전체를 봐요.")
+    with st.expander("🔐 캠프 화면(탭) 권한 관리 (관리자 전용)"):
+        st.caption("물류창고를 제외한 일반 캠프로 로그인했을 때 보이는 탭을 선택하세요. 관리자는 항상 전체를 봐요.")
         current_tab_perms = load_camp_tab_permissions()
         new_tab_perms = []
         for key, label in TAB_DEFS:
@@ -1652,13 +1669,33 @@ if auth["role"] == "admin":
             )
             if checked:
                 new_tab_perms.append(key)
-        if st.button("탭 권한 저장", key="save_tab_perms_btn"):
+        if st.button("캠프 탭 권한 저장", key="save_tab_perms_btn"):
             if not new_tab_perms:
                 st.error("최소 1개는 선택해야 해요.", icon=":material/error:")
             else:
                 save_camp_tab_permissions(new_tab_perms)
-                st.success("캠프/창고 탭 권한을 저장했습니다.", icon=":material/check_circle:")
+                st.success("캠프 탭 권한을 저장했습니다.", icon=":material/check_circle:")
                 load_camp_tab_permissions.clear()
+                st.rerun()
+
+    with st.expander("🏭 물류창고 화면(탭) 권한 관리 (관리자 전용)"):
+        st.caption("물류창고 계정으로 로그인했을 때 보이는 탭을 따로 선택하세요 (일반 캠프와 별개).")
+        current_wh_perms = load_warehouse_tab_permissions()
+        new_wh_perms = []
+        for key, label in TAB_DEFS:
+            display_label = label.split(": ", 1)[-1]
+            checked = st.checkbox(
+                display_label, value=(key in current_wh_perms), key=f"whtabperm_{key}"
+            )
+            if checked:
+                new_wh_perms.append(key)
+        if st.button("물류창고 탭 권한 저장", key="save_wh_tab_perms_btn"):
+            if not new_wh_perms:
+                st.error("최소 1개는 선택해야 해요.", icon=":material/error:")
+            else:
+                save_warehouse_tab_permissions(new_wh_perms)
+                st.success("물류창고 탭 권한을 저장했습니다.", icon=":material/check_circle:")
+                load_warehouse_tab_permissions.clear()
                 st.rerun()
 
 st.divider()
@@ -1728,6 +1765,8 @@ def estimate_depletion(qty, code):
 
 if auth["role"] == "admin":
     _visible_tab_keys = [k for k, _ in TAB_DEFS]
+elif auth["camp"] == "물류창고":
+    _visible_tab_keys = load_warehouse_tab_permissions()
 else:
     _visible_tab_keys = load_camp_tab_permissions()
 
