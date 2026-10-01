@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>캠프 재고이관 가이드</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f4f6fb;
+    --surface: #ffffff;
+    --ink: #16213e;
+    --muted: #5b6785;
+    --line: #dde3f0;
+    --accent: #3a5bdc;
+    --accent-ink: #ffffff;
+    --warn-bg: #fff4e0;
+    --warn-ink: #8a5a00;
+    --warn-line: #f0cc86;
+    --tag-send: #e8edfb;
+    --tag-send-ink: #3a5bdc;
+    --tag-mid: #fdeedc;
+    --tag-mid-ink: #b5650a;
+    --tag-done: #e3f5ea;
+    --tag-done-ink: #1c7a46;
+    --shadow: 0 1px 2px rgba(22,33,62,.04), 0 8px 24px -12px rgba(22,33,62,.12);
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #11152a;
+      --surface: #1a2040;
+      --ink: #eef1fb;
+      --muted: #9aa3c4;
+      --line: #2c335a;
+      --accent: #7c97f7;
+      --accent-ink: #0d1430;
+      --warn-bg: #2e2510;
+      --warn-ink: #f0c773;
+      --warn-line: #5a4418;
+      --tag-send: #202a52;
+      --tag-send-ink: #9db0ff;
+      --tag-mid: #3a2c14;
+      --tag-mid-ink: #f0a94f;
+      --tag-done: #15301f;
+      --tag-done-ink: #6fd196;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.5);
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'Noto Sans KR', -apple-system, sans-serif;
+    padding-inline: 18px;
+    padding-block: 0 48px;
+    line-height: 1.6;
+  }
+  a { color: var(--accent); }
+  img { max-width: 100%; }
+
+  .wrap { max-width: 720px; margin: 0 auto; }
+
+  header.hero { padding-block: 28px 20px; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px; font-weight: 700; letter-spacing: .08em;
+    color: var(--accent); text-transform: uppercase;
+  }
+  .eyebrow .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+  h1 {
+    font-size: clamp(24px, 6vw, 32px);
+    font-weight: 900;
+    margin: 10px 0 8px;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+  }
+  .sub { color: var(--muted); font-size: 15px; max-width: 54ch; }
+
+  .link-btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    margin-top: 16px; padding: 12px 18px;
+    background: var(--accent); color: var(--accent-ink);
+    border-radius: 12px; text-decoration: none;
+    font-weight: 700; font-size: 14.5px;
+    box-shadow: var(--shadow);
+  }
+  .link-btn svg { flex-shrink: 0; }
+
+  nav.quicknav {
+    display: flex; gap: 8px; flex-wrap: wrap;
+    margin-top: 22px; padding: 10px; border-radius: 14px;
+    background: var(--surface); border: 1px solid var(--line);
+  }
+  nav.quicknav a {
+    flex: 1 1 auto; min-width: 0;
+    text-align: center;
+    padding: 9px 10px; border-radius: 9px;
+    font-size: 13px; font-weight: 700;
+    color: var(--muted); text-decoration: none;
+    white-space: nowrap;
+  }
+  nav.quicknav a:hover { background: var(--tag-send); color: var(--accent); }
+
+  section.step { margin-top: 40px; scroll-margin-top: 16px; }
+  .step-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  .step-num {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700; font-size: 13px;
+    color: var(--accent);
+    border: 1px solid var(--line);
+    background: var(--surface);
+    border-radius: 999px;
+    padding: 3px 10px;
+    flex-shrink: 0;
+  }
+  h2 { font-size: 20px; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+  .step-desc { color: var(--muted); font-size: 14.5px; margin: 10px 0 16px; }
+
+  .shot {
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: var(--shadow);
+    background: var(--surface);
+  }
+  .shot img { display: block; width: 100%; height: auto; }
+
+  ol.steps { margin: 18px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 12px; }
+  ol.steps li {
+    display: flex; gap: 12px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 12px 14px;
+    font-size: 14.5px;
+  }
+  ol.steps li .n {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700; font-size: 13px;
+    color: var(--muted);
+    flex-shrink: 0;
+    min-width: 1.4em;
+  }
+  ol.steps li b { font-weight: 700; }
+  ol.steps li code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px;
+    background: var(--tag-send); color: var(--tag-send-ink);
+    padding: 1px 6px; border-radius: 5px;
+  }
+
+  .tags { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 16px 0; font-size: 13px; }
+  .tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700; font-size: 12px;
+    padding: 4px 10px; border-radius: 999px;
+  }
+  .tag.send { background: var(--tag-send); color: var(--tag-send-ink); }
+  .tag.mid { background: var(--tag-mid); color: var(--tag-mid-ink); }
+  .tag.done { background: var(--tag-done); color: var(--tag-done-ink); }
+  .arrow { color: var(--muted); font-size: 13px; }
+
+  .callout {
+    margin-top: 16px;
+    display: flex; gap: 10px;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-line);
+    color: var(--warn-ink);
+    border-radius: 12px;
+    padding: 13px 14px;
+    font-size: 14px;
+    font-weight: 500;
+  }
+  .callout .ic { flex-shrink: 0; margin-top: 1px; }
+
+  .divider { height: 1px; background: var(--line); margin: 40px 0 0; }
+
+  footer {
+    margin-top: 44px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 13.5px;
+  }
+  footer .faq-q { color: var(--ink); font-weight: 700; margin-top: 14px; }
+
+  @media (max-width: 480px) {
+    nav.quicknav a { font-size: 12px; padding: 9px 6px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="hero">
+    <span class="eyebrow"><span class="dot"></span>지바이크 SCM 대시보드</span>
+    <h1>캠프 재고이관, 이렇게 쓰세요</h1>
+    <p class="sub">로그인부터 캠프 간 재고이관, 창고 발주까지 — 캠프에서 바로 쓰는 3가지 기능만 모았습니다.</p>
+    <a class="link-btn" href="https://qpz9tpzwmnpoiz9dy7qf6f.streamlit.app/" target="_blank" rel="noopener">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+      대시보드 바로가기
+    </a>
+    <nav class="quicknav">
+      <a href="#login">로그인</a>
+      <a href="#rebalance">캠프간 이관</a>
+      <a href="#purchase">창고 발주</a>
+    </nav>
+  </header>
+
+  <section class="step" id="login">
+    <div class="step-head"><span class="step-num">STEP 1</span><h2>로그인하기</h2></div>
+    <p class="step-desc">접속하면 처음 몇 초간 "깨어나는" 로딩이 있을 수 있어요. 잠시만 기다려주세요.</p>
+    <div class="shot"><img src="login.png" alt="로그인 화면 — 캠프로 로그인 선택, 캠프 드롭다운, 비밀번호 입력창"></div>
+    <ol class="steps">
+      <li><span class="n">1</span><div>로그인 방식에서 <b>"캠프로 로그인"</b> 선택</div></li>
+      <li><span class="n">2</span><div>본인 소속 <b>캠프</b> 선택</div></li>
+      <li><span class="n">3</span><div><b>비밀번호</b> 입력 후 로그인 — 모르면 관리자에게 문의</div></li>
+    </ol>
+  </section>
+
+  <div class="divider"></div>
+
+  <section class="step" id="rebalance">
+    <div class="step-head"><span class="step-num">STEP 2</span><h2>재고이관(캠프&lt;&gt;캠프)</h2></div>
+    <p class="step-desc">다른 캠프와 재고를 주고받을 때 씁니다. 메뉴에서 <b>"재고이관(캠프&lt;&gt;캠프)"</b>를 선택하세요.</p>
+    <div class="shot"><img src="rebalance.png" alt="재고이관(캠프간) 화면 — 품목 검색창과 메뉴 탭"></div>
+
+    <h2 style="font-size:16px; margin-top:22px;">내가 요청할 때</h2>
+    <ol class="steps">
+      <li><span class="n">1</span><div>품목명 또는 품목번호로 검색</div></li>
+      <li><span class="n">2</span><div>캠프별 재고를 보고, 여유 있는 캠프에 이관 요청</div></li>
+      <li><span class="n">3</span><div>실제로 물건을 받으면 반드시 <code>입고완료</code> 클릭</div></li>
+    </ol>
+    <div class="tags">
+      <span class="tag send">요청중</span><span class="arrow">→</span>
+      <span class="tag mid">이동중 (상대 승인)</span><span class="arrow">→</span>
+      <span class="tag done">입고완료 (내가 클릭)</span>
+    </div>
+    <div class="callout">
+      <svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <div><b>입고완료를 눌러야</b> 내 캠프 재고에 실제로 반영돼요. 물건 받고 꼭 눌러주세요.</div>
+    </div>
+
+    <h2 style="font-size:16px; margin-top:26px;">요청을 받았을 때</h2>
+    <ol class="steps">
+      <li><span class="n">1</span><div>로그인하면 상단에 <b>"승인 대기 중인 요청이 N건 있어요"</b> 배너가 바로 뜸</div></li>
+      <li><span class="n">2</span><div>내용 확인 후 <code>승인</code> 또는 <code>거절</code> 클릭</div></li>
+      <li><span class="n">3</span><div>승인했으면 실제 물건을 보내주세요 (재고 차감은 상대가 입고완료를 눌러야 반영)</div></li>
+    </ol>
+  </section>
+
+  <div class="divider"></div>
+
+  <section class="step" id="purchase">
+    <div class="step-head"><span class="step-num">STEP 3</span><h2>재고이관(창고&lt;&gt;캠프)</h2></div>
+    <p class="step-desc">물류창고에 발주할 때 씁니다. 메뉴에서 <b>"재고이관(창고&lt;&gt;캠프)"</b>를 선택하세요.</p>
+    <div class="shot"><img src="purchase.png" alt="재고이관(창고) 화면 — 내 이름, 받는 캠프, 발주 목록에 담기 폼"></div>
+    <ol class="steps">
+      <li><span class="n">1</span><div><b>내 이름</b>과 <b>받는 캠프</b> 확인 (기본값은 내 캠프)</div></li>
+      <li><span class="n">2</span><div>"발주할 품목명 또는 번호 입력"에서 검색해 <b>발주 목록에 담기</b></div></li>
+      <li><span class="n">3</span><div>다 담았으면 <code>전체 발주 요청 제출</code> 클릭</div></li>
+      <li><span class="n">4</span><div>물류창고가 승인(발송 준비)하고 실제 물건이 도착하면 <code>입고완료</code> 클릭</div></li>
+    </ol>
+    <div class="tags">
+      <span class="tag send">요청중</span><span class="arrow">→</span>
+      <span class="tag mid">승인됨 (창고 발송 준비)</span><span class="arrow">→</span>
+      <span class="tag done">입고완료 (내가 클릭)</span>
+    </div>
+    <div class="callout">
+      <svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <div>여기도 마찬가지로 <b>입고완료를 눌러야</b> 캠프 재고에 실제로 반영돼요.</div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="faq-q">Q. 비밀번호를 모르겠어요</div>
+    <div>관리자에게 문의해주세요.</div>
+    <div class="faq-q">Q. 화면이 안 뜨거나 느려요</div>
+    <div>처음 접속 시 서버가 "깨어나는" 데 몇 초~수십 초 걸릴 수 있어요. 잠시 기다렸다가 새로고침해보세요.</div>
+    <div class="faq-q">Q. 그 밖에 문제가 있어요</div>
+    <div>담당 채널로 편하게 말씀해주세요.</div>
+  </footer>
+</div>
+</body>
+</html>
