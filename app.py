@@ -35,6 +35,21 @@ st.markdown(
 
 DB_CONN_NAME = "supabase_db"
 
+# 탭 키 -> 라벨. 관리자는 전체를 보고, 캠프/물류창고 로그인은 허용된 탭만 본다
+# (기본값은 재고이관 2개 — load_camp_tab_permissions 참고).
+TAB_DEFS = [
+    ("overview", ":material/dashboard: 개요"),
+    ("camps", ":material/location_on: 캠프별 현황"),
+    ("items", ":material/search: 품목 검색"),
+    ("rebalance", ":material/sync_alt: 재고이관(캠프<>캠프)"),
+    ("usage_amount", ":material/payments: 월별 사용 금액"),
+    ("category", ":material/category: 카테고리별 현황"),
+    ("forecast", ":material/query_stats: FORECAST"),
+    ("warehouse", ":material/warehouse: 창고 현황"),
+    ("purchase", ":material/local_shipping: 재고이관(창고<>캠프)"),
+    ("total", ":material/inventory: 지바이크 전체 재고"),
+]
+
 
 # ---------------- 데이터 파싱 ----------------
 
@@ -489,6 +504,22 @@ def save_data(key, obj):
             {"key": key, "data": json.dumps(obj, ensure_ascii=False)},
         )
         session.commit()
+
+
+def load_camp_tab_permissions():
+    """캠프/물류창고 로그인이 볼 수 있는 탭 키 목록. 없으면 기본값(재고이관 2개).
+    로그인한 사람이 뭘 누르든 매 rerun마다 도는 조회라 짧게 캐시한다."""
+    conn = get_db_connection()
+    df = conn.query("select data from app_data where key = 'camp_tab_permissions'", ttl=30)
+    if not df.empty:
+        perms = df.iloc[0]["data"]
+        if isinstance(perms, list) and perms:
+            return perms
+    return ["rebalance", "purchase"]
+
+
+def save_camp_tab_permissions(keys):
+    save_data("camp_tab_permissions", keys)
 
 
 def save_usage_facts(facts_df):
@@ -1599,6 +1630,26 @@ if auth["role"] == "admin":
             else:
                 st.error("비밀번호를 입력해주세요.", icon=":material/error:")
 
+    with st.expander("🔐 캠프/창고 화면(탭) 권한 관리 (관리자 전용)"):
+        st.caption("캠프 또는 물류창고로 로그인했을 때 보이는 탭을 선택하세요. 관리자는 항상 전체를 봐요.")
+        current_tab_perms = load_camp_tab_permissions()
+        new_tab_perms = []
+        for key, label in TAB_DEFS:
+            display_label = label.split(": ", 1)[-1]
+            checked = st.checkbox(
+                display_label, value=(key in current_tab_perms), key=f"tabperm_{key}"
+            )
+            if checked:
+                new_tab_perms.append(key)
+        if st.button("탭 권한 저장", key="save_tab_perms_btn"):
+            if not new_tab_perms:
+                st.error("최소 1개는 선택해야 해요.", icon=":material/error:")
+            else:
+                save_camp_tab_permissions(new_tab_perms)
+                st.success("캠프/창고 탭 권한을 저장했습니다.", icon=":material/check_circle:")
+                st.cache_data.clear()
+                st.rerun()
+
 st.divider()
 
 
@@ -1659,571 +1710,468 @@ def estimate_depletion(qty, code):
 
 
 # ---------------- 탭 ----------------
+# 관리자는 전체 탭을 보고, 캠프/물류창고 로그인은 관리자가 허용한 탭만 본다 (기본값은
+# 재고이관 2개). Streamlit은 st.tabs()에 넘긴 라벨 개수만큼만 탭을 만들기 때문에,
+# 안 보이는 탭은 아예 만들어지지 않아 매 rerun마다 돌지도 않는다 (반응속도 개선 겸함).
 
-(
-    tab_overview, tab_camps, tab_items, tab_rebalance, tab_usage_amount,
-    tab_category, tab_forecast, tab_warehouse, tab_purchase, tab_total,
-) = st.tabs(
-    [
-        ":material/dashboard: 개요",
-        ":material/location_on: 캠프별 현황",
-        ":material/search: 품목 검색",
-        ":material/sync_alt: 재고이관(캠프<>캠프)",
-        ":material/payments: 월별 사용 금액",
-        ":material/category: 카테고리별 현황",
-        ":material/query_stats: FORECAST",
-        ":material/warehouse: 창고 현황",
-        ":material/local_shipping: 재고이관(창고<>캠프)",
-        ":material/inventory: 지바이크 전체 재고",
-    ]
-)
+if auth["role"] == "admin":
+    _visible_tab_keys = [k for k, _ in TAB_DEFS]
+else:
+    _visible_tab_keys = load_camp_tab_permissions()
 
-with tab_overview:
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("총 품목 수", f"{len(data['items']):,}종", border=True)
-    k2.metric("총 재고 수량", f"{fmt_int(grand_qty)}개", border=True)
-    k3.metric("총 재고 금액", fmt_won(grand_amt), border=True)
-    k4.metric(
-        "운영 캠프 수",
-        f"{len(data['campsOrder'])}곳",
-        delta=(f"재고 0인 캠프 {zero_camps}곳" if zero_camps else None),
-        delta_color="inverse",
-        border=True,
-    )
+_visible_tab_defs = [d for d in TAB_DEFS if d[0] in _visible_tab_keys]
+if not _visible_tab_defs:
+    _visible_tab_defs = TAB_DEFS  # 안전장치: 권한이 비어있으면 전체를 보여준다
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("RS팀별 재고 금액")
-        st.bar_chart(team_df.set_index("팀")["재고 금액"])
-    with c2:
-        st.subheader("재고 금액 상위 캠프 TOP 8")
-        top8 = camp_df.sort_values("재고 금액", ascending=False).head(8)
-        st.bar_chart(top8.set_index("캠프")["재고 금액"])
+_tab_objs = st.tabs([label for _, label in _visible_tab_defs])
+tabs = {key: obj for (key, _), obj in zip(_visible_tab_defs, _tab_objs)}
 
-with tab_camps:
-    camp_weekly_amount = (usage.get("campWeeklyAmount") if usage else None) or {}
-    camp_full_df = camp_df.copy()
-    camp_full_df["주 사용 금액"] = camp_full_df["캠프"].map(camp_weekly_amount)
-    camp_full_df["재고 보유(주)"] = camp_full_df.apply(
-        lambda r: round(r["재고 금액"] / r["주 사용 금액"], 1) if r["주 사용 금액"] else None, axis=1
-    )
+if "overview" in tabs:
+    with tabs["overview"]:
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("총 품목 수", f"{len(data['items']):,}종", border=True)
+        k2.metric("총 재고 수량", f"{fmt_int(grand_qty)}개", border=True)
+        k3.metric("총 재고 금액", fmt_won(grand_amt), border=True)
+        k4.metric(
+            "운영 캠프 수",
+            f"{len(data['campsOrder'])}곳",
+            delta=(f"재고 0인 캠프 {zero_camps}곳" if zero_camps else None),
+            delta_color="inverse",
+            border=True,
+        )
 
-    sort_col = st.selectbox(
-        "정렬 기준", ["재고 금액", "재고 수량", "캠프", "팀", "재고 보유(주)"], index=0
-    )
-    ascending = st.checkbox("오름차순", value=False)
-    camp_full_df = camp_full_df.sort_values(sort_col, ascending=ascending, na_position="last")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("RS팀별 재고 금액")
+            st.bar_chart(team_df.set_index("팀")["재고 금액"])
+        with c2:
+            st.subheader("재고 금액 상위 캠프 TOP 8")
+            top8 = camp_df.sort_values("재고 금액", ascending=False).head(8)
+            st.bar_chart(top8.set_index("캠프")["재고 금액"])
 
-    st.caption(
-        "재고 보유(주)는 캠프 사용량 엑셀 기준 주 평균 사용 금액 대비, 현재 재고 금액이 "
-        "몇 주치인지를 나타내요. 사용량 데이터가 없으면 빈 칸으로 표시돼요."
-    )
+if "camps" in tabs:
+    with tabs["camps"]:
+        camp_weekly_amount = (usage.get("campWeeklyAmount") if usage else None) or {}
+        camp_full_df = camp_df.copy()
+        camp_full_df["주 사용 금액"] = camp_full_df["캠프"].map(camp_weekly_amount)
+        camp_full_df["재고 보유(주)"] = camp_full_df.apply(
+            lambda r: round(r["재고 금액"] / r["주 사용 금액"], 1) if r["주 사용 금액"] else None, axis=1
+        )
 
-    money_df = camp_full_df.sort_values("재고 금액", ascending=False)
-    camp_order = money_df["캠프"].tolist()
-    coverage_df = camp_full_df.dropna(subset=["재고 보유(주)"])
-    LINE_COLOR = "#F5A623"
+        sort_col = st.selectbox(
+            "정렬 기준", ["재고 금액", "재고 수량", "캠프", "팀", "재고 보유(주)"], index=0
+        )
+        ascending = st.checkbox("오름차순", value=False)
+        camp_full_df = camp_full_df.sort_values(sort_col, ascending=ascending, na_position="last")
 
-    st.subheader("캠프별 재고 금액 · 재고 지수(보유 주수)")
-    st.caption("막대 = 재고 금액(왼쪽 축), 선 = 재고 지수·재고 보유 주수(오른쪽 축, 주황색).")
+        st.caption(
+            "재고 보유(주)는 캠프 사용량 엑셀 기준 주 평균 사용 금액 대비, 현재 재고 금액이 "
+            "몇 주치인지를 나타내요. 사용량 데이터가 없으면 빈 칸으로 표시돼요."
+        )
 
-    bars_chart = (
-        alt.Chart(money_df)
-        .mark_bar(color=ACCENT, cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
-        .encode(
-            x=alt.X(
-                "캠프:N",
-                sort=camp_order,
-                title=None,
-                axis=alt.Axis(labelColor=CHART_MUTED, labelFontSize=10, labelAngle=-60, domain=False, ticks=False),
-            ),
-            y=alt.Y(
-                "재고 금액:Q",
-                title="재고 금액",
-                axis=alt.Axis(
-                    titleColor=ACCENT, labelColor=ACCENT, labelFontSize=11, gridColor=CHART_GRID,
-                    domain=False, ticks=False,
+        money_df = camp_full_df.sort_values("재고 금액", ascending=False)
+        camp_order = money_df["캠프"].tolist()
+        coverage_df = camp_full_df.dropna(subset=["재고 보유(주)"])
+        LINE_COLOR = "#F5A623"
+
+        st.subheader("캠프별 재고 금액 · 재고 지수(보유 주수)")
+        st.caption("막대 = 재고 금액(왼쪽 축), 선 = 재고 지수·재고 보유 주수(오른쪽 축, 주황색).")
+
+        bars_chart = (
+            alt.Chart(money_df)
+            .mark_bar(color=ACCENT, cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+            .encode(
+                x=alt.X(
+                    "캠프:N",
+                    sort=camp_order,
+                    title=None,
+                    axis=alt.Axis(labelColor=CHART_MUTED, labelFontSize=10, labelAngle=-60, domain=False, ticks=False),
                 ),
-            ),
-            tooltip=[alt.Tooltip("캠프:N"), alt.Tooltip("재고 금액:Q", format=",.0f")],
-        )
-    )
-
-    line_chart = (
-        alt.Chart(coverage_df)
-        .mark_line(
-            interpolate="monotone",
-            color=LINE_COLOR,
-            strokeWidth=2.5,
-            point=alt.OverlayMarkDef(filled=True, fill=LINE_COLOR, stroke="#10141B", strokeWidth=1.5, size=45),
-        )
-        .encode(
-            x=alt.X("캠프:N", sort=camp_order, title=None),
-            y=alt.Y(
-                "재고 보유(주):Q",
-                title="재고 보유(주)",
-                axis=alt.Axis(
-                    titleColor=LINE_COLOR, labelColor=LINE_COLOR, labelFontSize=11, orient="right",
-                    domain=False, ticks=False, grid=False,
+                y=alt.Y(
+                    "재고 금액:Q",
+                    title="재고 금액",
+                    axis=alt.Axis(
+                        titleColor=ACCENT, labelColor=ACCENT, labelFontSize=11, gridColor=CHART_GRID,
+                        domain=False, ticks=False,
+                    ),
                 ),
-            ),
-            tooltip=[alt.Tooltip("캠프:N"), alt.Tooltip("재고 보유(주):Q", format=",.1f")],
-        )
-    )
-
-    combo_chart = (
-        alt.layer(bars_chart, line_chart)
-        .resolve_scale(y="independent")
-        .properties(height=360)
-        .configure_view(strokeWidth=0)
-        .configure(background="transparent")
-    )
-    st.altair_chart(combo_chart, width="stretch")
-
-    st.dataframe(
-        camp_full_df,
-        hide_index=True,
-        column_config={
-            "재고 수량": st.column_config.NumberColumn(format="%,d개"),
-            "재고 금액": st.column_config.NumberColumn(format="₩%,d"),
-            "주 사용 금액": st.column_config.NumberColumn(format="₩%,d"),
-            "재고 보유(주)": st.column_config.NumberColumn(format="%.1f주"),
-        },
-    )
-
-with tab_items:
-    search = st.text_input("부품명 또는 부품 번호로 검색", "")
-    items = data["items"]
-    if search.strip():
-        q = search.strip().lower()
-        items = [it for it in items if q in it["n"].lower() or q in str(it["c"]).lower()]
-    st.caption(f"{len(items):,}개 품목 중 최대 50개 표시")
-    monthly_item_camp_qty = (usage.get("monthlyItemCampQty") if usage else None) or {}
-    for it in items[:50]:
-        camp_usage = get_usage_for_code(it["c"])
-        with st.expander(f"{it['n']}  ·  {it['c']}  ·  총 {fmt_int(it['q'])}개  ·  {fmt_won(it['a'])}"):
-            if not it["x"]:
-                st.caption("보유 캠프 없음")
-            else:
-                rows = []
-                for camp, (q, a) in sorted(it["x"].items(), key=lambda kv: -kv[1][0]):
-                    avg = camp_usage.get(camp, {}).get("avg") if camp_usage else None
-                    rows.append({"캠프": camp, "재고 수량": q, "주 평균 사용량": avg if avg is not None else "-"})
-                st.dataframe(pd.DataFrame(rows), hide_index=True)
-
-            if not camp_usage:
-                st.caption("이 품목의 사용량 데이터가 없어요.")
-            else:
-                st.markdown("**사용량 추이**")
-                gran_col, scope_col = st.columns(2)
-                granularity = gran_col.radio(
-                    "기간 단위", ["주별", "월별"], horizontal=True, key=f"usage_gran_{it['c']}"
-                )
-                usage_camps = sorted(camp_usage.keys())
-                scope = scope_col.selectbox(
-                    "범위", ["지바이크 전체"] + usage_camps, key=f"usage_scope_{it['c']}"
-                )
-
-                if granularity == "주별":
-                    if scope == "지바이크 전체":
-                        weekly_totals = {}
-                        for camp, u in camp_usage.items():
-                            for y, w, qv in u["w"]:
-                                weekly_totals[(y, w)] = weekly_totals.get((y, w), 0) + qv
-                        series = sorted(weekly_totals.items())
-                    else:
-                        u = camp_usage.get(scope)
-                        series = [((y, w), qv) for y, w, qv in u["w"]] if u else []
-                    trend_df = pd.DataFrame(
-                        {"주차": [f"{y}-{w}" for (y, w), _ in series], "사용량": [v for _, v in series]}
-                    )
-                    x_col = "주차"
-                else:
-                    item_monthly = monthly_item_camp_qty.get(it["c"], {})
-                    months = sorted(item_monthly.keys())
-                    if scope == "지바이크 전체":
-                        values = [sum(item_monthly[m].values()) for m in months]
-                    else:
-                        values = [item_monthly[m].get(scope, 0) for m in months]
-                    trend_df = pd.DataFrame({"월": months, "사용량": values})
-                    x_col = "월"
-
-                if trend_df.empty:
-                    st.caption("표시할 데이터가 없어요.")
-                else:
-                    st.altair_chart(render_trend_chart(trend_df, x_col, "사용량"), width="stretch")
-                    wide_df = trend_df.set_index(x_col).T
-                    st.dataframe(wide_df, hide_index=False)
-
-with tab_rebalance:
-    st.caption("품목을 선택하면 캠프별 재고 편차를 확인할 수 있어요")
-    query = st.text_input("재분배를 검토할 품목명 또는 번호 입력", "", key="rebalance_query")
-    selected = None
-    if query.strip():
-        q = query.strip().lower()
-        all_candidates = [it for it in data["items"] if q in it["n"].lower() or q in str(it["c"]).lower()]
-        candidates = all_candidates[:15]
-        if candidates:
-            if len(all_candidates) > len(candidates):
-                st.caption(
-                    f"검색 결과 {len(all_candidates)}건 중 상위 {len(candidates)}개만 표시했어요. "
-                    "검색어를 더 구체적으로 입력하면 찾는 품목이 더 잘 보여요."
-                )
-            options = {f"{it['n']} ({it['c']})": it for it in candidates}
-            picked_label = st.radio("검색 결과", list(options.keys()), index=0)
-            selected = options[picked_label]
-        else:
-            st.info("일치하는 품목이 없습니다.", icon=":material/search_off:")
-
-    if selected:
-        item_usage = get_usage_for_code(selected["c"])
-        req_df = list_transfer_requests(selected["c"])
-        if not req_df.empty:
-            # 승인(이동중) 상태는 아직 실제 재고에서 빠지지 않았지만(입고완료 시에만 차감),
-            # 이미 다른 곳으로 나가기로 확정된 수량이라 "가용재고" 계산에서는 미리 빼준다.
-            in_transit_out = req_df[req_df["status"] == "in_transit"].groupby("from_camp")["qty"].sum()
-        else:
-            in_transit_out = pd.Series(dtype=int)
-
-        rows = []
-        for camp in data["campsOrder"]:
-            pair = selected["x"].get(camp)
-            qty = pair[0] if pair else 0
-            intransit_qty = int(in_transit_out.get(camp, 0))
-            u = item_usage.get(camp) if item_usage else None
-            avg = u["avg"] if u else None
-            weeks_of_stock = round(qty / avg, 1) if avg and avg > 0 else None
-            rows.append(
-                {
-                    "팀": data["campToTeam"].get(camp, "-"),
-                    "캠프": camp,
-                    "재고 수량": qty,
-                    "가용재고": qty - intransit_qty,  # 재고 수량 - 이동중(승인됐지만 아직 미입고)
-                    "이동중재고": intransit_qty,  # 승인되어 이 캠프에서 나가는 중인 수량 (입고완료 전)
-                    "주 평균 사용량": avg,  # None(NaN) 또는 숫자
-                    "소진 예상(주)": weeks_of_stock,  # None(NaN) 또는 숫자
-                }
+                tooltip=[alt.Tooltip("캠프:N"), alt.Tooltip("재고 금액:Q", format=",.0f")],
             )
-        df_rows = pd.DataFrame(rows).sort_values("재고 수량", ascending=False)
-
-        # 재분배 제안 (NaN은 항상 False로 비교되므로 안전)
-        suggested_transfer = None
-        shortages = df_rows[(df_rows["재고 수량"] == 0) & (df_rows["주 평균 사용량"] > 0)]
-        if not shortages.empty:
-            donors = df_rows[(df_rows["재고 수량"] > 1)]
-            donors = donors[donors["소진 예상(주)"].isna() | (donors["소진 예상(주)"] > 4)]
-            donors = donors.sort_values("재고 수량", ascending=False)
-            if not donors.empty:
-                top = donors.iloc[0]
-                move_qty = max(1, int(top["재고 수량"] // 2))
-                to_camps = ", ".join(shortages["캠프"].head(3).tolist())
-                suggested_transfer = {"from": top["캠프"], "to": shortages["캠프"].iloc[0], "qty": move_qty}
-                st.warning(
-                    f"**{top['캠프']}**에 {fmt_int(top['재고 수량'])}개 보유 중인 반면, **{to_camps}**에는 재고가 없습니다. "
-                    f"약 {move_qty}개 이동을 검토해보세요. (최근 사용량 데이터를 반영한 제안)",
-                    icon=":material/lightbulb:",
-                )
-        else:
-            with_stock = df_rows[df_rows["재고 수량"] > 0]
-            empty = df_rows[df_rows["재고 수량"] == 0]
-            if not with_stock.empty and not empty.empty and with_stock.iloc[0]["재고 수량"] >= 2:
-                top = with_stock.iloc[0]
-                move_qty = max(1, int(top["재고 수량"] // 2))
-                to_camps = ", ".join(empty["캠프"].head(3).tolist())
-                suggested_transfer = {"from": top["캠프"], "to": empty["캠프"].iloc[0], "qty": move_qty}
-                st.warning(
-                    f"**{top['캠프']}**에 {fmt_int(top['재고 수량'])}개 보유 중인 반면, **{to_camps}**에는 재고가 없습니다. "
-                    f"약 {move_qty}개 이동을 검토해보세요. (사용량 데이터가 없어 재고량만 기준으로 한 참고용 제안)",
-                    icon=":material/lightbulb:",
-                )
-
-        st.subheader("캠프 간 재고 이관")
-        st.caption("요청 → 승인(이동중) → 입고완료 순서로 처리돼요. 실제 재고 수량은 입고완료 시점에 보내는 캠프에서 빠지고 받는 캠프에 더해지며, 승인되면 그 전까지는 \"가용재고\"에서만 미리 제외되어 보입니다.")
-
-        my_name = st.text_input(
-            "내 이름", value=st.session_state.get("transfer_my_name", ""), key="transfer_my_name_input"
         )
-        st.session_state["transfer_my_name"] = my_name
 
-        item_code = selected["c"]
-        with st.form(f"transfer_request_form_{item_code}"):
-            camps_order = data["campsOrder"]
-            default_from = camps_order.index(suggested_transfer["from"]) if suggested_transfer else 0
-            default_to = camps_order.index(suggested_transfer["to"]) if suggested_transfer else min(1, len(camps_order) - 1)
-            fc1, fc2, fc3 = st.columns([2, 2, 1])
-            with fc1:
-                from_camp_sel = st.selectbox("보내는 캠프", camps_order, index=default_from)
-            with fc2:
-                to_camp_sel = st.selectbox("받는 캠프", camps_order, index=default_to)
-            with fc3:
-                qty_sel = st.number_input(
-                    "수량", min_value=1, step=1, value=suggested_transfer["qty"] if suggested_transfer else 1
-                )
-            if st.form_submit_button("이관 요청"):
-                if not my_name.strip():
-                    st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
-                elif from_camp_sel == to_camp_sel:
-                    st.error("보내는 캠프와 받는 캠프가 같습니다.", icon=":material/error:")
-                else:
-                    create_transfer_request(
-                        item_code, selected["n"], from_camp_sel, to_camp_sel, int(qty_sel), my_name.strip()
-                    )
-                    st.success("이관 요청을 등록했습니다.", icon=":material/send:")
-                    st.cache_data.clear()
-                    st.rerun()
+        line_chart = (
+            alt.Chart(coverage_df)
+            .mark_line(
+                interpolate="monotone",
+                color=LINE_COLOR,
+                strokeWidth=2.5,
+                point=alt.OverlayMarkDef(filled=True, fill=LINE_COLOR, stroke="#10141B", strokeWidth=1.5, size=45),
+            )
+            .encode(
+                x=alt.X("캠프:N", sort=camp_order, title=None),
+                y=alt.Y(
+                    "재고 보유(주):Q",
+                    title="재고 보유(주)",
+                    axis=alt.Axis(
+                        titleColor=LINE_COLOR, labelColor=LINE_COLOR, labelFontSize=11, orient="right",
+                        domain=False, ticks=False, grid=False,
+                    ),
+                ),
+                tooltip=[alt.Tooltip("캠프:N"), alt.Tooltip("재고 보유(주):Q", format=",.1f")],
+            )
+        )
 
-        req_df = list_transfer_requests(item_code)
-        if my_login_camp and not req_df.empty:
-            # 캠프로 로그인했으면 나와 관련된(보내거나 받는) 요청만 보여준다.
-            req_df = req_df[(req_df["from_camp"] == my_login_camp) | (req_df["to_camp"] == my_login_camp)]
-        requested_rows = req_df[req_df["status"] == "requested"] if not req_df.empty else req_df
-        in_transit_rows = req_df[req_df["status"] == "in_transit"] if not req_df.empty else req_df
-        done_rows = req_df[req_df["status"].isin(["completed", "rejected"])] if not req_df.empty else req_df
-
-        if not requested_rows.empty:
-            st.markdown("**요청중**")
-            for _, r in requested_rows.iterrows():
-                if not my_login_camp or r["from_camp"] == my_login_camp:
-                    render_pending_request_row(r, data, my_name)
-                else:
-                    # 내가 승인 주체가 아니라 내가 요청한 쪽(to_camp) — 진행 상황만 보여준다.
-                    st.caption(
-                        f":material/schedule: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
-                        f"{int(r['qty'])}개 · 요청자: {r['requested_by']} (상대 캠프 승인 대기중)"
-                    )
-
-        if not in_transit_rows.empty:
-            st.markdown("**이동중**")
-            for _, r in in_transit_rows.iterrows():
-                if not my_login_camp or r["to_camp"] == my_login_camp:
-                    render_in_transit_request_row(r, data, my_name)
-                else:
-                    # 내가 입고완료 주체가 아니라 보낸 쪽(from_camp) — 진행 상황만 보여준다.
-                    st.caption(
-                        f":material/local_shipping: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
-                        f"{int(r['qty'])}개 · 승인자: {r['approved_by']} (입고 대기중)"
-                    )
-
-        if not done_rows.empty:
-            with st.expander(f"완료/거절 내역 ({len(done_rows)}건)", icon=":material/history:"):
-                for _, r in done_rows.iterrows():
-                    is_done = r["status"] == "completed"
-                    who = r["received_by"] if is_done else r["approved_by"]
-                    dc0, dc1 = st.columns([1, 5])
-                    if is_done:
-                        dc0.badge("입고완료", icon=":material/check_circle:", color="green")
-                    else:
-                        dc0.badge("거절", icon=":material/cancel:", color="red")
-                    dc1.caption(f"{r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · {who}")
-
-        if item_usage:
-            weekly_totals = {}
-            for camp, u in item_usage.items():
-                for y, w, qv in u["w"]:
-                    key = (y, w)
-                    weekly_totals[key] = weekly_totals.get(key, 0) + qv
-            trend = sorted(weekly_totals.items())[-12:]
-            if trend:
-                trend_df = pd.DataFrame(
-                    {"주차": [f"{y}-{w}" for (y, w), _ in trend], "사용량": [v for _, v in trend]}
-                )
-                st.subheader("전체 캠프 합산 · 최근 12주 사용량 추이")
-                st.altair_chart(render_trend_chart(trend_df, "주차", "사용량"), width="stretch")
-        else:
-            st.caption("이 품목의 사용량 데이터가 아직 없습니다. (재고 수량만으로 비교합니다)")
+        combo_chart = (
+            alt.layer(bars_chart, line_chart)
+            .resolve_scale(y="independent")
+            .properties(height=360)
+            .configure_view(strokeWidth=0)
+            .configure(background="transparent")
+        )
+        st.altair_chart(combo_chart, width="stretch")
 
         st.dataframe(
-            df_rows,
+            camp_full_df,
             hide_index=True,
             column_config={
                 "재고 수량": st.column_config.NumberColumn(format="%,d개"),
-                "가용재고": st.column_config.NumberColumn(format="%,d개"),
-                "이동중재고": st.column_config.NumberColumn(format="%,d개"),
-                "주 평균 사용량": st.column_config.NumberColumn(format="%.1f개/주"),
-                "소진 예상(주)": st.column_config.NumberColumn(format="%.1f주"),
+                "재고 금액": st.column_config.NumberColumn(format="₩%,d"),
+                "주 사용 금액": st.column_config.NumberColumn(format="₩%,d"),
+                "재고 보유(주)": st.column_config.NumberColumn(format="%.1f주"),
             },
         )
 
-with tab_usage_amount:
-    monthly_camp_amount = usage.get("monthlyCampAmount") if usage else None
-    if not monthly_camp_amount:
-        st.info("사용량 엑셀을 업로드하면 캠프별·월별 사용 금액을 확인할 수 있어요. (JSON 업로드에는 이 데이터가 없어요)", icon=":material/payments:")
-    else:
-        months = sorted(monthly_camp_amount.keys())
-        amt_rows = [
-            {"월": m, "캠프": camp, "금액": amt}
-            for m in months
-            for camp, amt in monthly_camp_amount[m].items()
-        ]
-        amt_df = pd.DataFrame(amt_rows)
+if "items" in tabs:
+    with tabs["items"]:
+        search = st.text_input("부품명 또는 부품 번호로 검색", "")
+        items = data["items"]
+        if search.strip():
+            q = search.strip().lower()
+            items = [it for it in items if q in it["n"].lower() or q in str(it["c"]).lower()]
+        st.caption(f"{len(items):,}개 품목 중 최대 50개 표시")
+        monthly_item_camp_qty = (usage.get("monthlyItemCampQty") if usage else None) or {}
+        for it in items[:50]:
+            camp_usage = get_usage_for_code(it["c"])
+            with st.expander(f"{it['n']}  ·  {it['c']}  ·  총 {fmt_int(it['q'])}개  ·  {fmt_won(it['a'])}"):
+                if not it["x"]:
+                    st.caption("보유 캠프 없음")
+                else:
+                    rows = []
+                    for camp, (q, a) in sorted(it["x"].items(), key=lambda kv: -kv[1][0]):
+                        avg = camp_usage.get(camp, {}).get("avg") if camp_usage else None
+                        rows.append({"캠프": camp, "재고 수량": q, "주 평균 사용량": avg if avg is not None else "-"})
+                    st.dataframe(pd.DataFrame(rows), hide_index=True)
 
-        monthly_total = amt_df.groupby("월")["금액"].sum().reindex(months, fill_value=0)
-        grand_total = monthly_total.sum()
-        monthly_avg = monthly_mean_excluding_current(monthly_total)
+                if not camp_usage:
+                    st.caption("이 품목의 사용량 데이터가 없어요.")
+                else:
+                    st.markdown("**사용량 추이**")
+                    gran_col, scope_col = st.columns(2)
+                    granularity = gran_col.radio(
+                        "기간 단위", ["주별", "월별"], horizontal=True, key=f"usage_gran_{it['c']}"
+                    )
+                    usage_camps = sorted(camp_usage.keys())
+                    scope = scope_col.selectbox(
+                        "범위", ["지바이크 전체"] + usage_camps, key=f"usage_scope_{it['c']}"
+                    )
 
-        k1, k2, k3 = st.columns(3)
-        k1.metric(
-            "총 사용 금액",
-            fmt_won(grand_total),
-            border=True,
-            chart_data=monthly_total,
-            chart_type="area",
-        )
-        k2.metric("월평균 사용 금액", fmt_won(monthly_avg), border=True)
-        k3.metric("데이터 기간", f"{months[0]} ~ {months[-1]} ({len(months)}개월)", border=True)
-        st.caption("이번 달은 아직 마감 전이라 월평균 계산에서는 제외했어요 (그래프·합계에는 포함돼요).")
-
-        st.subheader("전체 캠프 합산 · 월별 사용 금액 추이")
-        overall_trend_df = monthly_total.reset_index()
-        overall_trend_df.columns = ["월", "금액"]
-        st.altair_chart(render_trend_chart(overall_trend_df, "월", "금액"), width="stretch")
-        st.dataframe(
-            overall_trend_df.sort_values("월", ascending=False),
-            hide_index=True,
-            column_config={"금액": st.column_config.NumberColumn(format="₩%,d")},
-        )
-
-        sub_camp, sub_sku = st.tabs([":material/location_on: 캠프별 사용 금액", ":material/settings: 부품별 사용 금액"])
-
-        with sub_camp:
-            camp_totals = (
-                amt_df.groupby("캠프")["금액"].sum().sort_values(ascending=False).reset_index()
-            )
-            camp_totals.columns = ["캠프", "총 사용 금액"]
-
-            picked_camp = st.selectbox("캠프 선택", ["전체 캠프 합산"] + camp_totals["캠프"].tolist())
-            if picked_camp != "전체 캠프 합산":
-                camp_series = (
-                    amt_df[amt_df["캠프"] == picked_camp].set_index("월")["금액"].reindex(months, fill_value=0)
-                )
-                cc1, cc2 = st.columns(2)
-                cc1.metric(f"{picked_camp} 총 사용 금액", fmt_won(camp_series.sum()), border=True)
-                cc2.metric(
-                    f"{picked_camp} 월평균 사용 금액",
-                    fmt_won(monthly_mean_excluding_current(camp_series)),
-                    border=True,
-                )
-                camp_trend_df = camp_series.reset_index()
-                camp_trend_df.columns = ["월", "금액"]
-                st.altair_chart(render_trend_chart(camp_trend_df, "월", "금액"), width="stretch")
-                st.dataframe(
-                    camp_trend_df.sort_values("월", ascending=False),
-                    hide_index=True,
-                    column_config={"금액": st.column_config.NumberColumn(format="₩%,d")},
-                )
-
-            st.subheader("캠프별 총 사용 금액 순위 (전체 기간 합계)")
-            camp_bar = (
-                alt.Chart(camp_totals)
-                .mark_bar(color=ACCENT, cornerRadiusTopRight=3, cornerRadiusBottomRight=3, height=14)
-                .encode(
-                    y=alt.Y(
-                        "캠프:N",
-                        sort="-x",
-                        title=None,
-                        axis=alt.Axis(labelColor=CHART_MUTED, labelFontSize=11, domain=False, ticks=False),
-                    ),
-                    x=alt.X(
-                        "총 사용 금액:Q",
-                        title=None,
-                        axis=alt.Axis(
-                            labelColor=CHART_MUTED, labelFontSize=11, gridColor=CHART_GRID, domain=False, ticks=False
-                        ),
-                    ),
-                    tooltip=[alt.Tooltip("캠프:N"), alt.Tooltip("총 사용 금액:Q", format=",.0f")],
-                )
-                .properties(height=max(220, len(camp_totals) * 20))
-                .configure_view(strokeWidth=0)
-                .configure(background="transparent")
-            )
-            st.altair_chart(camp_bar, width="stretch")
-            st.dataframe(
-                camp_totals,
-                hide_index=True,
-                column_config={"총 사용 금액": st.column_config.NumberColumn(format="₩%,d")},
-            )
-
-        with sub_sku:
-            monthly_sku_amount = usage.get("monthlySkuAmount")
-            sku_names = usage.get("skuNames") or {}
-            if not monthly_sku_amount:
-                st.caption("이 사용량 데이터에는 부품별 금액 정보가 없어요. 사용량 엑셀을 다시 업로드하면 채워집니다.")
-            else:
-                sku_amt_rows = [
-                    {"SKU": sku, "월": m, "금액": amt}
-                    for m in months
-                    for sku, amt in monthly_sku_amount.get(m, {}).items()
-                ]
-                sku_amt_df = pd.DataFrame(sku_amt_rows)
-
-                sku_totals = sku_amt_df.groupby("SKU")["금액"].sum().sort_values(ascending=False).reset_index()
-                sku_totals.columns = ["SKU", "총 사용 금액"]
-                sku_totals["품명"] = sku_totals["SKU"].map(sku_names).fillna("-")
-
-                sku_weekly_amount = usage.get("skuWeeklyAmount") or {}
-                sku_totals["주평균 사용금액"] = sku_totals["SKU"].map(sku_weekly_amount)
-
-                sku_monthly_pivot = (
-                    sku_amt_df.pivot_table(index="SKU", columns="월", values="금액", fill_value=0)
-                    .reindex(columns=months, fill_value=0)
-                )
-                sku_monthly_avg = sku_monthly_pivot.apply(monthly_mean_excluding_current, axis=1)
-                sku_totals["월평균 사용금액"] = sku_totals["SKU"].map(sku_monthly_avg)
-
-                # 품명이 같은 부품이 섞여 있을 수 있어, 그래프/표 표시용으로는 SKU를 덧붙여 구분한다.
-                sku_totals["표시명"] = sku_totals["품명"] + " (" + sku_totals["SKU"] + ")"
-                sku_totals = sku_totals[
-                    ["표시명", "품명", "SKU", "총 사용 금액", "주평균 사용금액", "월평균 사용금액"]
-                ]
-
-                sku_query = st.text_input("SKU 또는 품명으로 검색해서 월별 추이 보기", "", key="usage_sku_query")
-                if sku_query.strip():
-                    q = sku_query.strip().lower()
-                    all_candidates = [
-                        s for s in sku_totals["SKU"] if q in s.lower() or q in str(sku_names.get(s, "")).lower()
-                    ]
-                    candidates = all_candidates[:15]
-                    if candidates:
-                        if len(all_candidates) > len(candidates):
-                            st.caption(
-                                f"검색 결과 {len(all_candidates)}건 중 상위 {len(candidates)}개만 표시했어요. "
-                                "검색어를 더 구체적으로 입력하면 찾는 품목이 더 잘 보여요."
-                            )
-                        labels = {f"{s} · {sku_names.get(s, '-')}": s for s in candidates}
-                        picked_label = st.radio("검색 결과", list(labels.keys()), key="usage_sku_radio")
-                        picked_sku = labels[picked_label]
-                        sku_series = (
-                            sku_amt_df[sku_amt_df["SKU"] == picked_sku]
-                            .set_index("월")["금액"]
-                            .reindex(months, fill_value=0)
+                    if granularity == "주별":
+                        if scope == "지바이크 전체":
+                            weekly_totals = {}
+                            for camp, u in camp_usage.items():
+                                for y, w, qv in u["w"]:
+                                    weekly_totals[(y, w)] = weekly_totals.get((y, w), 0) + qv
+                            series = sorted(weekly_totals.items())
+                        else:
+                            u = camp_usage.get(scope)
+                            series = [((y, w), qv) for y, w, qv in u["w"]] if u else []
+                        trend_df = pd.DataFrame(
+                            {"주차": [f"{y}-{w}" for (y, w), _ in series], "사용량": [v for _, v in series]}
                         )
-                        sc1, sc2 = st.columns(2)
-                        sc1.metric(f"{picked_label} 총 사용 금액", fmt_won(sku_series.sum()), border=True)
-                        sc2.metric(
-                            f"{picked_label} 월평균 사용 금액",
-                            fmt_won(monthly_mean_excluding_current(sku_series)),
-                            border=True,
-                        )
-                        sku_trend_df = sku_series.reset_index()
-                        sku_trend_df.columns = ["월", "금액"]
-                        st.altair_chart(render_trend_chart(sku_trend_df, "월", "금액"), width="stretch")
-                        st.dataframe(
-                            sku_trend_df.sort_values("월", ascending=False),
-                            hide_index=True,
-                            column_config={"금액": st.column_config.NumberColumn(format="₩%,d")},
-                        )
+                        x_col = "주차"
                     else:
-                        st.caption("일치하는 부품이 없습니다.")
+                        item_monthly = monthly_item_camp_qty.get(it["c"], {})
+                        months = sorted(item_monthly.keys())
+                        if scope == "지바이크 전체":
+                            values = [sum(item_monthly[m].values()) for m in months]
+                        else:
+                            values = [item_monthly[m].get(scope, 0) for m in months]
+                        trend_df = pd.DataFrame({"월": months, "사용량": values})
+                        x_col = "월"
 
-                st.subheader("부품별 총 사용 금액 순위 (전체 기간 합계)")
-                top_n = 25
-                sku_bar_df = sku_totals.head(top_n)
-                sku_bar = (
-                    alt.Chart(sku_bar_df)
+                    if trend_df.empty:
+                        st.caption("표시할 데이터가 없어요.")
+                    else:
+                        st.altair_chart(render_trend_chart(trend_df, x_col, "사용량"), width="stretch")
+                        wide_df = trend_df.set_index(x_col).T
+                        st.dataframe(wide_df, hide_index=False)
+
+if "rebalance" in tabs:
+    with tabs["rebalance"]:
+        st.caption("품목을 선택하면 캠프별 재고 편차를 확인할 수 있어요")
+        query = st.text_input("재분배를 검토할 품목명 또는 번호 입력", "", key="rebalance_query")
+        selected = None
+        if query.strip():
+            q = query.strip().lower()
+            all_candidates = [it for it in data["items"] if q in it["n"].lower() or q in str(it["c"]).lower()]
+            candidates = all_candidates[:15]
+            if candidates:
+                if len(all_candidates) > len(candidates):
+                    st.caption(
+                        f"검색 결과 {len(all_candidates)}건 중 상위 {len(candidates)}개만 표시했어요. "
+                        "검색어를 더 구체적으로 입력하면 찾는 품목이 더 잘 보여요."
+                    )
+                options = {f"{it['n']} ({it['c']})": it for it in candidates}
+                picked_label = st.radio("검색 결과", list(options.keys()), index=0)
+                selected = options[picked_label]
+            else:
+                st.info("일치하는 품목이 없습니다.", icon=":material/search_off:")
+
+        if selected:
+            item_usage = get_usage_for_code(selected["c"])
+            req_df = list_transfer_requests(selected["c"])
+            if not req_df.empty:
+                # 승인(이동중) 상태는 아직 실제 재고에서 빠지지 않았지만(입고완료 시에만 차감),
+                # 이미 다른 곳으로 나가기로 확정된 수량이라 "가용재고" 계산에서는 미리 빼준다.
+                in_transit_out = req_df[req_df["status"] == "in_transit"].groupby("from_camp")["qty"].sum()
+            else:
+                in_transit_out = pd.Series(dtype=int)
+
+            rows = []
+            for camp in data["campsOrder"]:
+                pair = selected["x"].get(camp)
+                qty = pair[0] if pair else 0
+                intransit_qty = int(in_transit_out.get(camp, 0))
+                u = item_usage.get(camp) if item_usage else None
+                avg = u["avg"] if u else None
+                weeks_of_stock = round(qty / avg, 1) if avg and avg > 0 else None
+                rows.append(
+                    {
+                        "팀": data["campToTeam"].get(camp, "-"),
+                        "캠프": camp,
+                        "재고 수량": qty,
+                        "가용재고": qty - intransit_qty,  # 재고 수량 - 이동중(승인됐지만 아직 미입고)
+                        "이동중재고": intransit_qty,  # 승인되어 이 캠프에서 나가는 중인 수량 (입고완료 전)
+                        "주 평균 사용량": avg,  # None(NaN) 또는 숫자
+                        "소진 예상(주)": weeks_of_stock,  # None(NaN) 또는 숫자
+                    }
+                )
+            df_rows = pd.DataFrame(rows).sort_values("재고 수량", ascending=False)
+
+            # 재분배 제안 (NaN은 항상 False로 비교되므로 안전)
+            suggested_transfer = None
+            shortages = df_rows[(df_rows["재고 수량"] == 0) & (df_rows["주 평균 사용량"] > 0)]
+            if not shortages.empty:
+                donors = df_rows[(df_rows["재고 수량"] > 1)]
+                donors = donors[donors["소진 예상(주)"].isna() | (donors["소진 예상(주)"] > 4)]
+                donors = donors.sort_values("재고 수량", ascending=False)
+                if not donors.empty:
+                    top = donors.iloc[0]
+                    move_qty = max(1, int(top["재고 수량"] // 2))
+                    to_camps = ", ".join(shortages["캠프"].head(3).tolist())
+                    suggested_transfer = {"from": top["캠프"], "to": shortages["캠프"].iloc[0], "qty": move_qty}
+                    st.warning(
+                        f"**{top['캠프']}**에 {fmt_int(top['재고 수량'])}개 보유 중인 반면, **{to_camps}**에는 재고가 없습니다. "
+                        f"약 {move_qty}개 이동을 검토해보세요. (최근 사용량 데이터를 반영한 제안)",
+                        icon=":material/lightbulb:",
+                    )
+            else:
+                with_stock = df_rows[df_rows["재고 수량"] > 0]
+                empty = df_rows[df_rows["재고 수량"] == 0]
+                if not with_stock.empty and not empty.empty and with_stock.iloc[0]["재고 수량"] >= 2:
+                    top = with_stock.iloc[0]
+                    move_qty = max(1, int(top["재고 수량"] // 2))
+                    to_camps = ", ".join(empty["캠프"].head(3).tolist())
+                    suggested_transfer = {"from": top["캠프"], "to": empty["캠프"].iloc[0], "qty": move_qty}
+                    st.warning(
+                        f"**{top['캠프']}**에 {fmt_int(top['재고 수량'])}개 보유 중인 반면, **{to_camps}**에는 재고가 없습니다. "
+                        f"약 {move_qty}개 이동을 검토해보세요. (사용량 데이터가 없어 재고량만 기준으로 한 참고용 제안)",
+                        icon=":material/lightbulb:",
+                    )
+
+            st.subheader("캠프 간 재고 이관")
+            st.caption("요청 → 승인(이동중) → 입고완료 순서로 처리돼요. 실제 재고 수량은 입고완료 시점에 보내는 캠프에서 빠지고 받는 캠프에 더해지며, 승인되면 그 전까지는 \"가용재고\"에서만 미리 제외되어 보입니다.")
+
+            my_name = st.text_input(
+                "내 이름", value=st.session_state.get("transfer_my_name", ""), key="transfer_my_name_input"
+            )
+            st.session_state["transfer_my_name"] = my_name
+
+            item_code = selected["c"]
+            with st.form(f"transfer_request_form_{item_code}"):
+                camps_order = data["campsOrder"]
+                default_from = camps_order.index(suggested_transfer["from"]) if suggested_transfer else 0
+                default_to = camps_order.index(suggested_transfer["to"]) if suggested_transfer else min(1, len(camps_order) - 1)
+                fc1, fc2, fc3 = st.columns([2, 2, 1])
+                with fc1:
+                    from_camp_sel = st.selectbox("보내는 캠프", camps_order, index=default_from)
+                with fc2:
+                    to_camp_sel = st.selectbox("받는 캠프", camps_order, index=default_to)
+                with fc3:
+                    qty_sel = st.number_input(
+                        "수량", min_value=1, step=1, value=suggested_transfer["qty"] if suggested_transfer else 1
+                    )
+                if st.form_submit_button("이관 요청"):
+                    if not my_name.strip():
+                        st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
+                    elif from_camp_sel == to_camp_sel:
+                        st.error("보내는 캠프와 받는 캠프가 같습니다.", icon=":material/error:")
+                    else:
+                        create_transfer_request(
+                            item_code, selected["n"], from_camp_sel, to_camp_sel, int(qty_sel), my_name.strip()
+                        )
+                        st.success("이관 요청을 등록했습니다.", icon=":material/send:")
+                        st.cache_data.clear()
+                        st.rerun()
+
+            req_df = list_transfer_requests(item_code)
+            if my_login_camp and not req_df.empty:
+                # 캠프로 로그인했으면 나와 관련된(보내거나 받는) 요청만 보여준다.
+                req_df = req_df[(req_df["from_camp"] == my_login_camp) | (req_df["to_camp"] == my_login_camp)]
+            requested_rows = req_df[req_df["status"] == "requested"] if not req_df.empty else req_df
+            in_transit_rows = req_df[req_df["status"] == "in_transit"] if not req_df.empty else req_df
+            done_rows = req_df[req_df["status"].isin(["completed", "rejected"])] if not req_df.empty else req_df
+
+            if not requested_rows.empty:
+                st.markdown("**요청중**")
+                for _, r in requested_rows.iterrows():
+                    if not my_login_camp or r["from_camp"] == my_login_camp:
+                        render_pending_request_row(r, data, my_name)
+                    else:
+                        # 내가 승인 주체가 아니라 내가 요청한 쪽(to_camp) — 진행 상황만 보여준다.
+                        st.caption(
+                            f":material/schedule: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
+                            f"{int(r['qty'])}개 · 요청자: {r['requested_by']} (상대 캠프 승인 대기중)"
+                        )
+
+            if not in_transit_rows.empty:
+                st.markdown("**이동중**")
+                for _, r in in_transit_rows.iterrows():
+                    if not my_login_camp or r["to_camp"] == my_login_camp:
+                        render_in_transit_request_row(r, data, my_name)
+                    else:
+                        # 내가 입고완료 주체가 아니라 보낸 쪽(from_camp) — 진행 상황만 보여준다.
+                        st.caption(
+                            f":material/local_shipping: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
+                            f"{int(r['qty'])}개 · 승인자: {r['approved_by']} (입고 대기중)"
+                        )
+
+            if not done_rows.empty:
+                with st.expander(f"완료/거절 내역 ({len(done_rows)}건)", icon=":material/history:"):
+                    for _, r in done_rows.iterrows():
+                        is_done = r["status"] == "completed"
+                        who = r["received_by"] if is_done else r["approved_by"]
+                        dc0, dc1 = st.columns([1, 5])
+                        if is_done:
+                            dc0.badge("입고완료", icon=":material/check_circle:", color="green")
+                        else:
+                            dc0.badge("거절", icon=":material/cancel:", color="red")
+                        dc1.caption(f"{r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · {who}")
+
+            if item_usage:
+                weekly_totals = {}
+                for camp, u in item_usage.items():
+                    for y, w, qv in u["w"]:
+                        key = (y, w)
+                        weekly_totals[key] = weekly_totals.get(key, 0) + qv
+                trend = sorted(weekly_totals.items())[-12:]
+                if trend:
+                    trend_df = pd.DataFrame(
+                        {"주차": [f"{y}-{w}" for (y, w), _ in trend], "사용량": [v for _, v in trend]}
+                    )
+                    st.subheader("전체 캠프 합산 · 최근 12주 사용량 추이")
+                    st.altair_chart(render_trend_chart(trend_df, "주차", "사용량"), width="stretch")
+            else:
+                st.caption("이 품목의 사용량 데이터가 아직 없습니다. (재고 수량만으로 비교합니다)")
+
+            st.dataframe(
+                df_rows,
+                hide_index=True,
+                column_config={
+                    "재고 수량": st.column_config.NumberColumn(format="%,d개"),
+                    "가용재고": st.column_config.NumberColumn(format="%,d개"),
+                    "이동중재고": st.column_config.NumberColumn(format="%,d개"),
+                    "주 평균 사용량": st.column_config.NumberColumn(format="%.1f개/주"),
+                    "소진 예상(주)": st.column_config.NumberColumn(format="%.1f주"),
+                },
+            )
+
+if "usage_amount" in tabs:
+    with tabs["usage_amount"]:
+        monthly_camp_amount = usage.get("monthlyCampAmount") if usage else None
+        if not monthly_camp_amount:
+            st.info("사용량 엑셀을 업로드하면 캠프별·월별 사용 금액을 확인할 수 있어요. (JSON 업로드에는 이 데이터가 없어요)", icon=":material/payments:")
+        else:
+            months = sorted(monthly_camp_amount.keys())
+            amt_rows = [
+                {"월": m, "캠프": camp, "금액": amt}
+                for m in months
+                for camp, amt in monthly_camp_amount[m].items()
+            ]
+            amt_df = pd.DataFrame(amt_rows)
+
+            monthly_total = amt_df.groupby("월")["금액"].sum().reindex(months, fill_value=0)
+            grand_total = monthly_total.sum()
+            monthly_avg = monthly_mean_excluding_current(monthly_total)
+
+            k1, k2, k3 = st.columns(3)
+            k1.metric(
+                "총 사용 금액",
+                fmt_won(grand_total),
+                border=True,
+                chart_data=monthly_total,
+                chart_type="area",
+            )
+            k2.metric("월평균 사용 금액", fmt_won(monthly_avg), border=True)
+            k3.metric("데이터 기간", f"{months[0]} ~ {months[-1]} ({len(months)}개월)", border=True)
+            st.caption("이번 달은 아직 마감 전이라 월평균 계산에서는 제외했어요 (그래프·합계에는 포함돼요).")
+
+            st.subheader("전체 캠프 합산 · 월별 사용 금액 추이")
+            overall_trend_df = monthly_total.reset_index()
+            overall_trend_df.columns = ["월", "금액"]
+            st.altair_chart(render_trend_chart(overall_trend_df, "월", "금액"), width="stretch")
+            st.dataframe(
+                overall_trend_df.sort_values("월", ascending=False),
+                hide_index=True,
+                column_config={"금액": st.column_config.NumberColumn(format="₩%,d")},
+            )
+
+            sub_camp, sub_sku = st.tabs([":material/location_on: 캠프별 사용 금액", ":material/settings: 부품별 사용 금액"])
+
+            with sub_camp:
+                camp_totals = (
+                    amt_df.groupby("캠프")["금액"].sum().sort_values(ascending=False).reset_index()
+                )
+                camp_totals.columns = ["캠프", "총 사용 금액"]
+
+                picked_camp = st.selectbox("캠프 선택", ["전체 캠프 합산"] + camp_totals["캠프"].tolist())
+                if picked_camp != "전체 캠프 합산":
+                    camp_series = (
+                        amt_df[amt_df["캠프"] == picked_camp].set_index("월")["금액"].reindex(months, fill_value=0)
+                    )
+                    cc1, cc2 = st.columns(2)
+                    cc1.metric(f"{picked_camp} 총 사용 금액", fmt_won(camp_series.sum()), border=True)
+                    cc2.metric(
+                        f"{picked_camp} 월평균 사용 금액",
+                        fmt_won(monthly_mean_excluding_current(camp_series)),
+                        border=True,
+                    )
+                    camp_trend_df = camp_series.reset_index()
+                    camp_trend_df.columns = ["월", "금액"]
+                    st.altair_chart(render_trend_chart(camp_trend_df, "월", "금액"), width="stretch")
+                    st.dataframe(
+                        camp_trend_df.sort_values("월", ascending=False),
+                        hide_index=True,
+                        column_config={"금액": st.column_config.NumberColumn(format="₩%,d")},
+                    )
+
+                st.subheader("캠프별 총 사용 금액 순위 (전체 기간 합계)")
+                camp_bar = (
+                    alt.Chart(camp_totals)
                     .mark_bar(color=ACCENT, cornerRadiusTopRight=3, cornerRadiusBottomRight=3, height=14)
                     .encode(
                         y=alt.Y(
-                            "표시명:N",
+                            "캠프:N",
                             sort="-x",
                             title=None,
                             axis=alt.Axis(labelColor=CHART_MUTED, labelFontSize=11, domain=False, ticks=False),
@@ -2232,843 +2180,953 @@ with tab_usage_amount:
                             "총 사용 금액:Q",
                             title=None,
                             axis=alt.Axis(
-                                labelColor=CHART_MUTED,
-                                labelFontSize=11,
-                                gridColor=CHART_GRID,
-                                domain=False,
-                                ticks=False,
+                                labelColor=CHART_MUTED, labelFontSize=11, gridColor=CHART_GRID, domain=False, ticks=False
                             ),
                         ),
-                        tooltip=[
-                            alt.Tooltip("품명:N"),
-                            alt.Tooltip("SKU:N"),
-                            alt.Tooltip("총 사용 금액:Q", format=",.0f"),
-                        ],
+                        tooltip=[alt.Tooltip("캠프:N"), alt.Tooltip("총 사용 금액:Q", format=",.0f")],
                     )
-                    .properties(height=max(220, len(sku_bar_df) * 20))
+                    .properties(height=max(220, len(camp_totals) * 20))
                     .configure_view(strokeWidth=0)
                     .configure(background="transparent")
                 )
-                st.altair_chart(sku_bar, width="stretch")
-                st.caption(f"상위 {top_n}개만 그래프로 표시했어요 (전체 {len(sku_totals):,}개 부품은 아래 표에서 검색 가능).")
-
-                sku_table_search = st.text_input("SKU 또는 품명으로 검색 (표)", "", key="usage_sku_table_search")
-                sku_table_df = sku_totals
-                if sku_table_search.strip():
-                    q = sku_table_search.strip().lower()
-                    sku_table_df = sku_table_df[
-                        sku_table_df["SKU"].str.lower().str.contains(q, regex=False)
-                        | sku_table_df["품명"].str.lower().str.contains(q, regex=False)
-                    ]
+                st.altair_chart(camp_bar, width="stretch")
                 st.dataframe(
-                    sku_table_df[["품명", "SKU", "총 사용 금액", "주평균 사용금액", "월평균 사용금액"]],
+                    camp_totals,
+                    hide_index=True,
+                    column_config={"총 사용 금액": st.column_config.NumberColumn(format="₩%,d")},
+                )
+
+            with sub_sku:
+                monthly_sku_amount = usage.get("monthlySkuAmount")
+                sku_names = usage.get("skuNames") or {}
+                if not monthly_sku_amount:
+                    st.caption("이 사용량 데이터에는 부품별 금액 정보가 없어요. 사용량 엑셀을 다시 업로드하면 채워집니다.")
+                else:
+                    sku_amt_rows = [
+                        {"SKU": sku, "월": m, "금액": amt}
+                        for m in months
+                        for sku, amt in monthly_sku_amount.get(m, {}).items()
+                    ]
+                    sku_amt_df = pd.DataFrame(sku_amt_rows)
+
+                    sku_totals = sku_amt_df.groupby("SKU")["금액"].sum().sort_values(ascending=False).reset_index()
+                    sku_totals.columns = ["SKU", "총 사용 금액"]
+                    sku_totals["품명"] = sku_totals["SKU"].map(sku_names).fillna("-")
+
+                    sku_weekly_amount = usage.get("skuWeeklyAmount") or {}
+                    sku_totals["주평균 사용금액"] = sku_totals["SKU"].map(sku_weekly_amount)
+
+                    sku_monthly_pivot = (
+                        sku_amt_df.pivot_table(index="SKU", columns="월", values="금액", fill_value=0)
+                        .reindex(columns=months, fill_value=0)
+                    )
+                    sku_monthly_avg = sku_monthly_pivot.apply(monthly_mean_excluding_current, axis=1)
+                    sku_totals["월평균 사용금액"] = sku_totals["SKU"].map(sku_monthly_avg)
+
+                    # 품명이 같은 부품이 섞여 있을 수 있어, 그래프/표 표시용으로는 SKU를 덧붙여 구분한다.
+                    sku_totals["표시명"] = sku_totals["품명"] + " (" + sku_totals["SKU"] + ")"
+                    sku_totals = sku_totals[
+                        ["표시명", "품명", "SKU", "총 사용 금액", "주평균 사용금액", "월평균 사용금액"]
+                    ]
+
+                    sku_query = st.text_input("SKU 또는 품명으로 검색해서 월별 추이 보기", "", key="usage_sku_query")
+                    if sku_query.strip():
+                        q = sku_query.strip().lower()
+                        all_candidates = [
+                            s for s in sku_totals["SKU"] if q in s.lower() or q in str(sku_names.get(s, "")).lower()
+                        ]
+                        candidates = all_candidates[:15]
+                        if candidates:
+                            if len(all_candidates) > len(candidates):
+                                st.caption(
+                                    f"검색 결과 {len(all_candidates)}건 중 상위 {len(candidates)}개만 표시했어요. "
+                                    "검색어를 더 구체적으로 입력하면 찾는 품목이 더 잘 보여요."
+                                )
+                            labels = {f"{s} · {sku_names.get(s, '-')}": s for s in candidates}
+                            picked_label = st.radio("검색 결과", list(labels.keys()), key="usage_sku_radio")
+                            picked_sku = labels[picked_label]
+                            sku_series = (
+                                sku_amt_df[sku_amt_df["SKU"] == picked_sku]
+                                .set_index("월")["금액"]
+                                .reindex(months, fill_value=0)
+                            )
+                            sc1, sc2 = st.columns(2)
+                            sc1.metric(f"{picked_label} 총 사용 금액", fmt_won(sku_series.sum()), border=True)
+                            sc2.metric(
+                                f"{picked_label} 월평균 사용 금액",
+                                fmt_won(monthly_mean_excluding_current(sku_series)),
+                                border=True,
+                            )
+                            sku_trend_df = sku_series.reset_index()
+                            sku_trend_df.columns = ["월", "금액"]
+                            st.altair_chart(render_trend_chart(sku_trend_df, "월", "금액"), width="stretch")
+                            st.dataframe(
+                                sku_trend_df.sort_values("월", ascending=False),
+                                hide_index=True,
+                                column_config={"금액": st.column_config.NumberColumn(format="₩%,d")},
+                            )
+                        else:
+                            st.caption("일치하는 부품이 없습니다.")
+
+                    st.subheader("부품별 총 사용 금액 순위 (전체 기간 합계)")
+                    top_n = 25
+                    sku_bar_df = sku_totals.head(top_n)
+                    sku_bar = (
+                        alt.Chart(sku_bar_df)
+                        .mark_bar(color=ACCENT, cornerRadiusTopRight=3, cornerRadiusBottomRight=3, height=14)
+                        .encode(
+                            y=alt.Y(
+                                "표시명:N",
+                                sort="-x",
+                                title=None,
+                                axis=alt.Axis(labelColor=CHART_MUTED, labelFontSize=11, domain=False, ticks=False),
+                            ),
+                            x=alt.X(
+                                "총 사용 금액:Q",
+                                title=None,
+                                axis=alt.Axis(
+                                    labelColor=CHART_MUTED,
+                                    labelFontSize=11,
+                                    gridColor=CHART_GRID,
+                                    domain=False,
+                                    ticks=False,
+                                ),
+                            ),
+                            tooltip=[
+                                alt.Tooltip("품명:N"),
+                                alt.Tooltip("SKU:N"),
+                                alt.Tooltip("총 사용 금액:Q", format=",.0f"),
+                            ],
+                        )
+                        .properties(height=max(220, len(sku_bar_df) * 20))
+                        .configure_view(strokeWidth=0)
+                        .configure(background="transparent")
+                    )
+                    st.altair_chart(sku_bar, width="stretch")
+                    st.caption(f"상위 {top_n}개만 그래프로 표시했어요 (전체 {len(sku_totals):,}개 부품은 아래 표에서 검색 가능).")
+
+                    sku_table_search = st.text_input("SKU 또는 품명으로 검색 (표)", "", key="usage_sku_table_search")
+                    sku_table_df = sku_totals
+                    if sku_table_search.strip():
+                        q = sku_table_search.strip().lower()
+                        sku_table_df = sku_table_df[
+                            sku_table_df["SKU"].str.lower().str.contains(q, regex=False)
+                            | sku_table_df["품명"].str.lower().str.contains(q, regex=False)
+                        ]
+                    st.dataframe(
+                        sku_table_df[["품명", "SKU", "총 사용 금액", "주평균 사용금액", "월평균 사용금액"]],
+                        hide_index=True,
+                        column_config={
+                            "총 사용 금액": st.column_config.NumberColumn(format="₩%,d"),
+                            "주평균 사용금액": st.column_config.NumberColumn(format="₩%,d"),
+                            "월평균 사용금액": st.column_config.NumberColumn(format="₩%,d"),
+                        },
+                    )
+
+if "category" in tabs:
+    with tabs["category"]:
+        st.caption(
+            "임의로 SKU들을 묶어서 재고 금액과 월별 사용 금액을 따로 확인할 수 있어요 "
+            "(예: 단종 예정 부품, 특정 모델 전용 부품 등)."
+        )
+
+        if auth["role"] == "admin":
+            with st.expander("📁 카테고리 관리 (관리자 전용)"):
+                existing_categories = list_categories()
+                cat_admin_action = st.radio(
+                    "작업", ["만들기 / 수정", "삭제"], horizontal=True, key="cat_admin_action"
+                )
+                if cat_admin_action == "만들기 / 수정":
+                    cat_pick = st.selectbox(
+                        "카테고리 선택 또는 새로 만들기", ["(새 카테고리)"] + existing_categories, key="cat_admin_pick"
+                    )
+                    if cat_pick == "(새 카테고리)":
+                        cat_name_input = st.text_input("카테고리 이름", key="cat_admin_new_name")
+                        default_codes = ""
+                    else:
+                        cat_name_input = cat_pick
+                        default_codes = "\n".join(list_category_items(cat_pick))
+                    codes_text = st.text_area(
+                        "SKU 목록 (한 줄에 하나씩 붙여넣으세요)", value=default_codes, height=200, key="cat_admin_codes"
+                    )
+                    if st.button("저장", type="primary", icon=":material/save:", key="cat_admin_save_btn"):
+                        name = cat_name_input.strip()
+                        codes = [c.strip() for c in codes_text.splitlines() if c.strip()]
+                        if not name:
+                            st.error("카테고리 이름을 입력해주세요.", icon=":material/error:")
+                        elif not codes:
+                            st.error("SKU를 한 개 이상 입력해주세요.", icon=":material/error:")
+                        else:
+                            save_category_items(name, codes)
+                            st.success(
+                                f"'{name}' 카테고리에 SKU {len(set(codes))}개를 저장했습니다.",
+                                icon=":material/check_circle:",
+                            )
+                            st.cache_data.clear()
+                            st.rerun()
+                else:
+                    if existing_categories:
+                        del_pick = st.selectbox("삭제할 카테고리", existing_categories, key="cat_admin_del_pick")
+                        if st.button("삭제", icon=":material/delete:", key="cat_admin_del_btn"):
+                            delete_category(del_pick)
+                            st.success(f"'{del_pick}' 카테고리를 삭제했습니다.", icon=":material/check_circle:")
+                            st.cache_data.clear()
+                            st.rerun()
+                    else:
+                        st.caption("삭제할 카테고리가 없어요.")
+
+        categories = list_categories()
+        if not categories:
+            st.info("아직 만들어진 카테고리가 없어요. 관리자가 위 패널에서 만들 수 있어요.", icon=":material/category:")
+        else:
+            view_cat = st.selectbox("카테고리 선택", categories, key="cat_view_pick")
+            cat_codes = list_category_items(view_cat)
+            cat_code_set = set(cat_codes)
+            matched_items = [it for it in data["items"] if it.get("c") in cat_code_set]
+            matched_codes = {it["c"] for it in matched_items}
+            unmatched_codes = cat_code_set - matched_codes
+
+            total_qty = sum(it["q"] for it in matched_items)
+            total_amt = sum(it["a"] for it in matched_items)
+
+            k1, k2, k3 = st.columns(3)
+            k1.metric("SKU 수", f"{len(cat_codes)}개", border=True)
+            k2.metric("캠프 재고 수량", f"{fmt_int(total_qty)}개", border=True)
+            k3.metric("캠프 재고 금액", fmt_won(total_amt), border=True)
+            if unmatched_codes:
+                st.caption(
+                    f":material/warning: 현재 재고 데이터에서 찾을 수 없는 SKU {len(unmatched_codes)}개가 있어요 "
+                    "(품목 코드를 다시 확인해주세요)."
+                )
+
+            st.subheader("월별 사용 금액 추이")
+            try:
+                usage_trend_df = load_category_monthly_usage(cat_codes)
+            except Exception as e:
+                usage_trend_df = pd.DataFrame()
+                st.error(f"사용량 데이터를 불러오는 중 문제가 발생했습니다: {e}", icon=":material/error:")
+            if usage_trend_df.empty:
+                st.caption("이 카테고리에 대한 사용량 데이터가 없어요.")
+            else:
+                usage_trend_df = usage_trend_df.copy()
+                usage_trend_df["월"] = (
+                    usage_trend_df["year"].astype(str) + "-" + usage_trend_df["month"].astype(str).str.zfill(2)
+                )
+                chart_df = usage_trend_df[["월", "amt"]].rename(columns={"amt": "사용 금액"})
+                st.altair_chart(render_trend_chart(chart_df, "월", "사용 금액"), width="stretch")
+                st.dataframe(
+                    usage_trend_df[["월", "qty", "amt"]]
+                    .rename(columns={"qty": "사용 수량", "amt": "사용 금액"})
+                    .sort_values("월", ascending=False),
                     hide_index=True,
                     column_config={
-                        "총 사용 금액": st.column_config.NumberColumn(format="₩%,d"),
-                        "주평균 사용금액": st.column_config.NumberColumn(format="₩%,d"),
-                        "월평균 사용금액": st.column_config.NumberColumn(format="₩%,d"),
+                        "사용 수량": st.column_config.NumberColumn(format="%,d개"),
+                        "사용 금액": st.column_config.NumberColumn(format="₩%,d"),
                     },
                 )
 
-with tab_category:
-    st.caption(
-        "임의로 SKU들을 묶어서 재고 금액과 월별 사용 금액을 따로 확인할 수 있어요 "
-        "(예: 단종 예정 부품, 특정 모델 전용 부품 등)."
-    )
+            st.subheader("SKU별 상세")
+            try:
+                monthly_usage_df = load_recent_monthly_usage_by_sku(cat_codes)
+                monthly_usage_map = dict(zip(monthly_usage_df["item_code"], monthly_usage_df["avg_qty"]))
+            except Exception:
+                monthly_usage_map = {}
 
-    if auth["role"] == "admin":
-        with st.expander("📁 카테고리 관리 (관리자 전용)"):
-            existing_categories = list_categories()
-            cat_admin_action = st.radio(
-                "작업", ["만들기 / 수정", "삭제"], horizontal=True, key="cat_admin_action"
+            detail_rows = []
+            for it in matched_items:
+                avg_qty = monthly_usage_map.get(it["c"])
+                months_left = (it["q"] / avg_qty) if avg_qty and avg_qty > 0 and it["q"] > 0 else None
+                depletion_date = (
+                    (datetime.now() + timedelta(days=months_left * 30.44)).date() if months_left is not None else None
+                )
+                detail_rows.append(
+                    {
+                        "SKU": it["c"],
+                        "품명": it["n"],
+                        "재고 수량": it["q"],
+                        "재고 금액": it["a"],
+                        "월 사용수량": avg_qty,
+                        "소진 예상(개월)": round(months_left, 1) if months_left is not None else None,
+                        "예상 소진일": depletion_date.isoformat() if depletion_date else None,
+                    }
+                )
+            for code in unmatched_codes:
+                detail_rows.append(
+                    {
+                        "SKU": code,
+                        "품명": "(재고 데이터에 없음)",
+                        "재고 수량": 0,
+                        "재고 금액": 0,
+                        "월 사용수량": monthly_usage_map.get(code),
+                        "소진 예상(개월)": None,
+                        "예상 소진일": None,
+                    }
+                )
+            detail_df = pd.DataFrame(detail_rows).sort_values("재고 금액", ascending=False)
+            display_detail_df = detail_df.copy()
+            display_detail_df["예상 소진일"] = display_detail_df["예상 소진일"].fillna("-")
+            st.dataframe(
+                display_detail_df,
+                hide_index=True,
+                column_config={
+                    "재고 수량": st.column_config.NumberColumn(format="%,d개"),
+                    "재고 금액": st.column_config.NumberColumn(format="₩%,d"),
+                    "월 사용수량": st.column_config.NumberColumn(format="%.1f개"),
+                    "소진 예상(개월)": st.column_config.NumberColumn(format="%.1f개월"),
+                },
             )
-            if cat_admin_action == "만들기 / 수정":
-                cat_pick = st.selectbox(
-                    "카테고리 선택 또는 새로 만들기", ["(새 카테고리)"] + existing_categories, key="cat_admin_pick"
+            st.caption(
+                "월 사용수량은 최근 3개월(이번 달 제외) 전체 캠프 합산 평균이에요. "
+                "소진 예상은 현재 재고 수량 ÷ 월 사용수량 기준의 단순 추정이라 실제와 다를 수 있어요."
+            )
+
+if "forecast" in tabs:
+    with tabs["forecast"]:
+        st.caption(
+            "캠프별로 품목별 다음 몇 달치 예상 사용량을 직접 입력해요. 최근 3개월(이번 달 제외) 평균이 "
+            "참고용으로 먼저 채워지고, 필요하면 조정해서 저장하면 됩니다. "
+            "(추후 회귀분석 기반 자동 예측으로 보완/대체할 예정)"
+        )
+
+        fc_my_name = st.text_input(
+            "내 이름", value=st.session_state.get("transfer_my_name", ""), key="fc_my_name_input"
+        )
+        st.session_state["transfer_my_name"] = fc_my_name
+
+        fc_camp = st.selectbox("캠프 선택", data["campsOrder"], key="fc_camp_select")
+
+        fc_now = datetime.now()
+        fc_month_options = []
+        fy, fm = fc_now.year, fc_now.month
+        for _ in range(3):
+            fm += 1
+            if fm > 12:
+                fm = 1
+                fy += 1
+            fc_month_options.append((fy, fm))
+        fc_month_labels = [f"{y}-{m:02d}" for y, m in fc_month_options]
+        fc_month_label = st.selectbox("예측 대상 월", fc_month_labels, key="fc_month_select")
+        fc_year, fc_month = fc_month_options[fc_month_labels.index(fc_month_label)]
+
+        try:
+            with st.spinner("최근 사용 품목을 불러오는 중이에요..."):
+                top_items_df = top_camp_items_recent(fc_camp, limit=30)
+                existing_df = load_demand_forecasts(fc_camp, fc_year, fc_month)
+        except Exception as e:
+            st.error(f"데이터를 불러오는 중 문제가 발생했습니다: {e}", icon=":material/error:")
+        else:
+            if top_items_df.empty:
+                st.caption(f"{fc_camp}의 최근 3개월 사용량 데이터가 없어요.")
+            else:
+                existing_by_code = (
+                    {row["item_code"]: row for _, row in existing_df.iterrows()} if not existing_df.empty else {}
                 )
-                if cat_pick == "(새 카테고리)":
-                    cat_name_input = st.text_input("카테고리 이름", key="cat_admin_new_name")
-                    default_codes = ""
-                else:
-                    cat_name_input = cat_pick
-                    default_codes = "\n".join(list_category_items(cat_pick))
-                codes_text = st.text_area(
-                    "SKU 목록 (한 줄에 하나씩 붙여넣으세요)", value=default_codes, height=200, key="cat_admin_codes"
-                )
-                if st.button("저장", type="primary", icon=":material/save:", key="cat_admin_save_btn"):
-                    name = cat_name_input.strip()
-                    codes = [c.strip() for c in codes_text.splitlines() if c.strip()]
-                    if not name:
-                        st.error("카테고리 이름을 입력해주세요.", icon=":material/error:")
-                    elif not codes:
-                        st.error("SKU를 한 개 이상 입력해주세요.", icon=":material/error:")
+
+                fc_rows = []
+                for _, r in top_items_df.iterrows():
+                    code = r["item_code"]
+                    existing = existing_by_code.get(code)
+                    default_qty = (
+                        float(existing["predicted_qty"]) if existing is not None else round(r["avg_qty"] or 0, 1)
+                    )
+                    fc_rows.append(
+                        {
+                            "SKU": code,
+                            "품명": r["item_name"] or "-",
+                            "최근 3개월 평균": r["avg_qty"],
+                            "예측 수량": default_qty,
+                        }
+                    )
+                fc_table_df = pd.DataFrame(fc_rows)
+
+                st.caption(f"{fc_camp} · {fc_month_label} 예측 (최근 사용량 상위 {len(fc_table_df)}개 품목)")
+                with st.form(f"fc_form_{fc_camp}_{fc_year}_{fc_month}"):
+                    fc_edited_df = st.data_editor(
+                        fc_table_df,
+                        hide_index=True,
+                        disabled=["SKU", "품명", "최근 3개월 평균"],
+                        column_config={
+                            "최근 3개월 평균": st.column_config.NumberColumn(format="%.1f개"),
+                            "예측 수량": st.column_config.NumberColumn(format="%d개", min_value=0, step=1),
+                        },
+                        key=f"fc_editor_{fc_camp}_{fc_year}_{fc_month}",
+                    )
+                    fc_submitted = st.form_submit_button("예측 저장", type="primary", icon=":material/save:")
+
+                if fc_submitted:
+                    if not fc_my_name.strip():
+                        st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
                     else:
-                        save_category_items(name, codes)
+                        save_rows = [
+                            {
+                                "camp": fc_camp,
+                                "item_code": r["SKU"],
+                                "item_name": r["품명"],
+                                "forecast_year": fc_year,
+                                "forecast_month": fc_month,
+                                "predicted_qty": float(r["예측 수량"]),
+                                "historical_avg_qty": (
+                                    float(r["최근 3개월 평균"]) if pd.notna(r["최근 3개월 평균"]) else None
+                                ),
+                                "entered_by": fc_my_name.strip(),
+                            }
+                            for _, r in fc_edited_df.iterrows()
+                        ]
+                        save_demand_forecasts(save_rows)
                         st.success(
-                            f"'{name}' 카테고리에 SKU {len(set(codes))}개를 저장했습니다.",
+                            f"{fc_camp} {fc_month_label} 예측 {len(save_rows)}건을 저장했습니다.",
                             icon=":material/check_circle:",
                         )
                         st.cache_data.clear()
                         st.rerun()
-            else:
-                if existing_categories:
-                    del_pick = st.selectbox("삭제할 카테고리", existing_categories, key="cat_admin_del_pick")
-                    if st.button("삭제", icon=":material/delete:", key="cat_admin_del_btn"):
-                        delete_category(del_pick)
-                        st.success(f"'{del_pick}' 카테고리를 삭제했습니다.", icon=":material/check_circle:")
-                        st.cache_data.clear()
-                        st.rerun()
-                else:
-                    st.caption("삭제할 카테고리가 없어요.")
 
-    categories = list_categories()
-    if not categories:
-        st.info("아직 만들어진 카테고리가 없어요. 관리자가 위 패널에서 만들 수 있어요.", icon=":material/category:")
-    else:
-        view_cat = st.selectbox("카테고리 선택", categories, key="cat_view_pick")
-        cat_codes = list_category_items(view_cat)
-        cat_code_set = set(cat_codes)
-        matched_items = [it for it in data["items"] if it.get("c") in cat_code_set]
-        matched_codes = {it["c"] for it in matched_items}
-        unmatched_codes = cat_code_set - matched_codes
-
-        total_qty = sum(it["q"] for it in matched_items)
-        total_amt = sum(it["a"] for it in matched_items)
-
-        k1, k2, k3 = st.columns(3)
-        k1.metric("SKU 수", f"{len(cat_codes)}개", border=True)
-        k2.metric("캠프 재고 수량", f"{fmt_int(total_qty)}개", border=True)
-        k3.metric("캠프 재고 금액", fmt_won(total_amt), border=True)
-        if unmatched_codes:
-            st.caption(
-                f":material/warning: 현재 재고 데이터에서 찾을 수 없는 SKU {len(unmatched_codes)}개가 있어요 "
-                "(품목 코드를 다시 확인해주세요)."
-            )
-
-        st.subheader("월별 사용 금액 추이")
-        try:
-            usage_trend_df = load_category_monthly_usage(cat_codes)
-        except Exception as e:
-            usage_trend_df = pd.DataFrame()
-            st.error(f"사용량 데이터를 불러오는 중 문제가 발생했습니다: {e}", icon=":material/error:")
-        if usage_trend_df.empty:
-            st.caption("이 카테고리에 대한 사용량 데이터가 없어요.")
+        st.subheader("저장된 예측 이력")
+        fc_hist_df = list_demand_forecasts(camp=fc_camp)
+        if fc_hist_df.empty:
+            st.caption("아직 저장된 예측이 없어요.")
         else:
-            usage_trend_df = usage_trend_df.copy()
-            usage_trend_df["월"] = (
-                usage_trend_df["year"].astype(str) + "-" + usage_trend_df["month"].astype(str).str.zfill(2)
+            fc_hist_display = fc_hist_df.copy()
+            fc_hist_display["예측 대상월"] = (
+                fc_hist_display["forecast_year"].astype(str) + "-"
+                + fc_hist_display["forecast_month"].astype(str).str.zfill(2)
             )
-            chart_df = usage_trend_df[["월", "amt"]].rename(columns={"amt": "사용 금액"})
-            st.altair_chart(render_trend_chart(chart_df, "월", "사용 금액"), width="stretch")
             st.dataframe(
-                usage_trend_df[["월", "qty", "amt"]]
-                .rename(columns={"qty": "사용 수량", "amt": "사용 금액"})
-                .sort_values("월", ascending=False),
+                fc_hist_display[
+                    ["예측 대상월", "item_name", "item_code", "predicted_qty", "historical_avg_qty", "entered_by"]
+                ].rename(columns={"item_name": "품명", "item_code": "SKU"}),
                 hide_index=True,
                 column_config={
-                    "사용 수량": st.column_config.NumberColumn(format="%,d개"),
-                    "사용 금액": st.column_config.NumberColumn(format="₩%,d"),
+                    "predicted_qty": st.column_config.NumberColumn("예측 수량", format="%.1f개"),
+                    "historical_avg_qty": st.column_config.NumberColumn("최근 3개월 평균", format="%.1f개"),
                 },
             )
 
-        st.subheader("SKU별 상세")
-        try:
-            monthly_usage_df = load_recent_monthly_usage_by_sku(cat_codes)
-            monthly_usage_map = dict(zip(monthly_usage_df["item_code"], monthly_usage_df["avg_qty"]))
-        except Exception:
-            monthly_usage_map = {}
-
-        detail_rows = []
-        for it in matched_items:
-            avg_qty = monthly_usage_map.get(it["c"])
-            months_left = (it["q"] / avg_qty) if avg_qty and avg_qty > 0 and it["q"] > 0 else None
-            depletion_date = (
-                (datetime.now() + timedelta(days=months_left * 30.44)).date() if months_left is not None else None
+if "total" in tabs:
+    with tabs["total"]:
+        if not get_boxhero_token():
+            st.info(
+                "박스히어로 연동이 설정되면 창고 + 캠프 전체 재고를 함께 볼 수 있어요.",
+                icon=":material/link_off:",
             )
-            detail_rows.append(
-                {
-                    "SKU": it["c"],
-                    "품명": it["n"],
-                    "재고 수량": it["q"],
-                    "재고 금액": it["a"],
-                    "월 사용수량": avg_qty,
-                    "소진 예상(개월)": round(months_left, 1) if months_left is not None else None,
-                    "예상 소진일": depletion_date.isoformat() if depletion_date else None,
-                }
-            )
-        for code in unmatched_codes:
-            detail_rows.append(
-                {
-                    "SKU": code,
-                    "품명": "(재고 데이터에 없음)",
-                    "재고 수량": 0,
-                    "재고 금액": 0,
-                    "월 사용수량": monthly_usage_map.get(code),
-                    "소진 예상(개월)": None,
-                    "예상 소진일": None,
-                }
-            )
-        detail_df = pd.DataFrame(detail_rows).sort_values("재고 금액", ascending=False)
-        display_detail_df = detail_df.copy()
-        display_detail_df["예상 소진일"] = display_detail_df["예상 소진일"].fillna("-")
-        st.dataframe(
-            display_detail_df,
-            hide_index=True,
-            column_config={
-                "재고 수량": st.column_config.NumberColumn(format="%,d개"),
-                "재고 금액": st.column_config.NumberColumn(format="₩%,d"),
-                "월 사용수량": st.column_config.NumberColumn(format="%.1f개"),
-                "소진 예상(개월)": st.column_config.NumberColumn(format="%.1f개월"),
-            },
-        )
-        st.caption(
-            "월 사용수량은 최근 3개월(이번 달 제외) 전체 캠프 합산 평균이에요. "
-            "소진 예상은 현재 재고 수량 ÷ 월 사용수량 기준의 단순 추정이라 실제와 다를 수 있어요."
-        )
-
-with tab_forecast:
-    st.caption(
-        "캠프별로 품목별 다음 몇 달치 예상 사용량을 직접 입력해요. 최근 3개월(이번 달 제외) 평균이 "
-        "참고용으로 먼저 채워지고, 필요하면 조정해서 저장하면 됩니다. "
-        "(추후 회귀분석 기반 자동 예측으로 보완/대체할 예정)"
-    )
-
-    fc_my_name = st.text_input(
-        "내 이름", value=st.session_state.get("transfer_my_name", ""), key="fc_my_name_input"
-    )
-    st.session_state["transfer_my_name"] = fc_my_name
-
-    fc_camp = st.selectbox("캠프 선택", data["campsOrder"], key="fc_camp_select")
-
-    fc_now = datetime.now()
-    fc_month_options = []
-    fy, fm = fc_now.year, fc_now.month
-    for _ in range(3):
-        fm += 1
-        if fm > 12:
-            fm = 1
-            fy += 1
-        fc_month_options.append((fy, fm))
-    fc_month_labels = [f"{y}-{m:02d}" for y, m in fc_month_options]
-    fc_month_label = st.selectbox("예측 대상 월", fc_month_labels, key="fc_month_select")
-    fc_year, fc_month = fc_month_options[fc_month_labels.index(fc_month_label)]
-
-    try:
-        with st.spinner("최근 사용 품목을 불러오는 중이에요..."):
-            top_items_df = top_camp_items_recent(fc_camp, limit=30)
-            existing_df = load_demand_forecasts(fc_camp, fc_year, fc_month)
-    except Exception as e:
-        st.error(f"데이터를 불러오는 중 문제가 발생했습니다: {e}", icon=":material/error:")
-    else:
-        if top_items_df.empty:
-            st.caption(f"{fc_camp}의 최근 3개월 사용량 데이터가 없어요.")
         else:
-            existing_by_code = (
-                {row["item_code"]: row for _, row in existing_df.iterrows()} if not existing_df.empty else {}
-            )
-
-            fc_rows = []
-            for _, r in top_items_df.iterrows():
-                code = r["item_code"]
-                existing = existing_by_code.get(code)
-                default_qty = (
-                    float(existing["predicted_qty"]) if existing is not None else round(r["avg_qty"] or 0, 1)
-                )
-                fc_rows.append(
-                    {
-                        "SKU": code,
-                        "품명": r["item_name"] or "-",
-                        "최근 3개월 평균": r["avg_qty"],
-                        "예측 수량": default_qty,
-                    }
-                )
-            fc_table_df = pd.DataFrame(fc_rows)
-
-            st.caption(f"{fc_camp} · {fc_month_label} 예측 (최근 사용량 상위 {len(fc_table_df)}개 품목)")
-            with st.form(f"fc_form_{fc_camp}_{fc_year}_{fc_month}"):
-                fc_edited_df = st.data_editor(
-                    fc_table_df,
-                    hide_index=True,
-                    disabled=["SKU", "품명", "최근 3개월 평균"],
-                    column_config={
-                        "최근 3개월 평균": st.column_config.NumberColumn(format="%.1f개"),
-                        "예측 수량": st.column_config.NumberColumn(format="%d개", min_value=0, step=1),
-                    },
-                    key=f"fc_editor_{fc_camp}_{fc_year}_{fc_month}",
-                )
-                fc_submitted = st.form_submit_button("예측 저장", type="primary", icon=":material/save:")
-
-            if fc_submitted:
-                if not fc_my_name.strip():
-                    st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
-                else:
-                    save_rows = [
-                        {
-                            "camp": fc_camp,
-                            "item_code": r["SKU"],
-                            "item_name": r["품명"],
-                            "forecast_year": fc_year,
-                            "forecast_month": fc_month,
-                            "predicted_qty": float(r["예측 수량"]),
-                            "historical_avg_qty": (
-                                float(r["최근 3개월 평균"]) if pd.notna(r["최근 3개월 평균"]) else None
-                            ),
-                            "entered_by": fc_my_name.strip(),
-                        }
-                        for _, r in fc_edited_df.iterrows()
-                    ]
-                    save_demand_forecasts(save_rows)
-                    st.success(
-                        f"{fc_camp} {fc_month_label} 예측 {len(save_rows)}건을 저장했습니다.",
-                        icon=":material/check_circle:",
-                    )
-                    st.cache_data.clear()
-                    st.rerun()
-
-    st.subheader("저장된 예측 이력")
-    fc_hist_df = list_demand_forecasts(camp=fc_camp)
-    if fc_hist_df.empty:
-        st.caption("아직 저장된 예측이 없어요.")
-    else:
-        fc_hist_display = fc_hist_df.copy()
-        fc_hist_display["예측 대상월"] = (
-            fc_hist_display["forecast_year"].astype(str) + "-"
-            + fc_hist_display["forecast_month"].astype(str).str.zfill(2)
-        )
-        st.dataframe(
-            fc_hist_display[
-                ["예측 대상월", "item_name", "item_code", "predicted_qty", "historical_avg_qty", "entered_by"]
-            ].rename(columns={"item_name": "품명", "item_code": "SKU"}),
-            hide_index=True,
-            column_config={
-                "predicted_qty": st.column_config.NumberColumn("예측 수량", format="%.1f개"),
-                "historical_avg_qty": st.column_config.NumberColumn("최근 3개월 평균", format="%.1f개"),
-            },
-        )
-
-with tab_total:
-    if not get_boxhero_token():
-        st.info(
-            "박스히어로 연동이 설정되면 창고 + 캠프 전체 재고를 함께 볼 수 있어요.",
-            icon=":material/link_off:",
-        )
-    else:
-        try:
-            with st.spinner("박스히어로에서 창고 데이터를 가져오는 중이에요..."):
-                wh_items = fetch_boxhero_items()
-        except Exception as e:
-            st.error(f"박스히어로 연동 중 문제가 발생했습니다: {e}", icon=":material/error:")
-        else:
-            warehouse_qty = sum(it.get("quantity", 0) for it in wh_items)
-            warehouse_amt = sum(it.get("quantity", 0) * float(it.get("price") or 0) for it in wh_items)
-            camp_qty = grand_qty
-            camp_amt = grand_amt
-            total_qty = warehouse_qty + camp_qty
-            total_amt = warehouse_amt + camp_amt
-
-            st.caption("수량 기준")
-            k1, k2, k3 = st.columns(3)
-            k1.metric("지바이크 전체 재고 수량", f"{fmt_int(total_qty)}개", border=True)
-            k2.metric("캠프 재고 (36곳 합계)", f"{fmt_int(camp_qty)}개", border=True)
-            k3.metric("물류창고 재고", f"{fmt_int(warehouse_qty)}개", border=True)
-
-            st.caption("금액 기준")
-            m1, m2, m3 = st.columns(3)
-            m1.metric("지바이크 전체 재고 금액", fmt_won(total_amt), border=True)
-            m2.metric("캠프 재고 금액", fmt_won(camp_amt), border=True)
-            m3.metric("물류창고 재고 금액", fmt_won(warehouse_amt), border=True)
-            st.caption(
-                "창고 재고 금액은 원가(cost) 입력이 대부분 비어있어 판매가(price) 기준으로 계산했어요 "
-                "— 캠프 재고 금액과 산정 기준이 달라 완전히 동일한 비교는 아니에요."
-            )
-
-            breakdown_df = pd.DataFrame(
-                {"구분": ["캠프 (36곳 합계)", "물류창고"], "재고 금액": [camp_amt, warehouse_amt]}
-            )
-            st.subheader("창고 vs 캠프 재고 금액 비중")
-            breakdown_bar = (
-                alt.Chart(breakdown_df)
-                .mark_bar(color=ACCENT, cornerRadiusTopRight=4, cornerRadiusBottomRight=4, height=32)
-                .encode(
-                    y=alt.Y(
-                        "구분:N",
-                        sort="-x",
-                        title=None,
-                        axis=alt.Axis(labelColor=CHART_MUTED, labelFontSize=12, domain=False, ticks=False),
-                    ),
-                    x=alt.X(
-                        "재고 금액:Q",
-                        title=None,
-                        axis=alt.Axis(
-                            labelColor=CHART_MUTED, labelFontSize=11, gridColor=CHART_GRID, domain=False, ticks=False
-                        ),
-                    ),
-                    tooltip=[alt.Tooltip("구분:N"), alt.Tooltip("재고 금액:Q", format=",.0f")],
-                )
-                .properties(height=140)
-                .configure_view(strokeWidth=0)
-                .configure(background="transparent")
-            )
-            st.altair_chart(breakdown_bar, width="stretch")
-
-            st.subheader("주별 재고 금액 추이 (창고 + 캠프)")
-            trend_raw = load_inventory_value_trend()
-            if trend_raw.empty:
-                st.caption("아직 쌓인 현황이 없어요. 이번 주부터 자동으로 쌓여요 (매주 처음 접속할 때 그 주의 최신 값으로 갱신돼요).")
+            try:
+                with st.spinner("박스히어로에서 창고 데이터를 가져오는 중이에요..."):
+                    wh_items = fetch_boxhero_items()
+            except Exception as e:
+                st.error(f"박스히어로 연동 중 문제가 발생했습니다: {e}", icon=":material/error:")
             else:
-                trend_wide = trend_raw.pivot_table(
-                    index="period_label", columns="source", values="amt", aggfunc="sum", fill_value=0
-                ).reset_index()
-                for col in ("camp", "warehouse"):
-                    if col not in trend_wide.columns:
-                        trend_wide[col] = 0
-                trend_wide["전체"] = trend_wide["camp"] + trend_wide["warehouse"]
-                trend_wide = trend_wide.rename(columns={"camp": "캠프", "warehouse": "물류창고"})
-                trend_long = trend_wide.melt(
-                    id_vars="period_label", value_vars=["전체", "캠프", "물류창고"], var_name="구분", value_name="재고 금액"
+                warehouse_qty = sum(it.get("quantity", 0) for it in wh_items)
+                warehouse_amt = sum(it.get("quantity", 0) * float(it.get("price") or 0) for it in wh_items)
+                camp_qty = grand_qty
+                camp_amt = grand_amt
+                total_qty = warehouse_qty + camp_qty
+                total_amt = warehouse_amt + camp_amt
+
+                st.caption("수량 기준")
+                k1, k2, k3 = st.columns(3)
+                k1.metric("지바이크 전체 재고 수량", f"{fmt_int(total_qty)}개", border=True)
+                k2.metric("캠프 재고 (36곳 합계)", f"{fmt_int(camp_qty)}개", border=True)
+                k3.metric("물류창고 재고", f"{fmt_int(warehouse_qty)}개", border=True)
+
+                st.caption("금액 기준")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("지바이크 전체 재고 금액", fmt_won(total_amt), border=True)
+                m2.metric("캠프 재고 금액", fmt_won(camp_amt), border=True)
+                m3.metric("물류창고 재고 금액", fmt_won(warehouse_amt), border=True)
+                st.caption(
+                    "창고 재고 금액은 원가(cost) 입력이 대부분 비어있어 판매가(price) 기준으로 계산했어요 "
+                    "— 캠프 재고 금액과 산정 기준이 달라 완전히 동일한 비교는 아니에요."
                 )
-                trend_line = (
-                    alt.Chart(trend_long)
-                    .mark_line(point=True, strokeWidth=2)
+
+                breakdown_df = pd.DataFrame(
+                    {"구분": ["캠프 (36곳 합계)", "물류창고"], "재고 금액": [camp_amt, warehouse_amt]}
+                )
+                st.subheader("창고 vs 캠프 재고 금액 비중")
+                breakdown_bar = (
+                    alt.Chart(breakdown_df)
+                    .mark_bar(color=ACCENT, cornerRadiusTopRight=4, cornerRadiusBottomRight=4, height=32)
                     .encode(
-                        x=alt.X(
-                            "period_label:O",
-                            sort=None,
-                            title=None,
-                            axis=alt.Axis(labelColor=CHART_MUTED, labelFontSize=11, domain=False, ticks=False, grid=False),
-                        ),
                         y=alt.Y(
+                            "구분:N",
+                            sort="-x",
+                            title=None,
+                            axis=alt.Axis(labelColor=CHART_MUTED, labelFontSize=12, domain=False, ticks=False),
+                        ),
+                        x=alt.X(
                             "재고 금액:Q",
                             title=None,
                             axis=alt.Axis(
-                                labelColor=CHART_MUTED, labelFontSize=11, domain=False, ticks=False,
-                                gridColor=CHART_GRID, tickCount=4,
+                                labelColor=CHART_MUTED, labelFontSize=11, gridColor=CHART_GRID, domain=False, ticks=False
                             ),
                         ),
-                        color=alt.Color("구분:N", scale=alt.Scale(scheme="category10"), legend=alt.Legend(title=None, labelColor=CHART_MUTED)),
-                        tooltip=[alt.Tooltip("period_label:O", title="주차"), alt.Tooltip("구분:N"), alt.Tooltip("재고 금액:Q", format=",.0f")],
+                        tooltip=[alt.Tooltip("구분:N"), alt.Tooltip("재고 금액:Q", format=",.0f")],
                     )
-                    .properties(height=240)
+                    .properties(height=140)
                     .configure_view(strokeWidth=0)
                     .configure(background="transparent")
                 )
-                st.altair_chart(trend_line, width="stretch")
-                st.caption(
-                    "스냅샷 시점 단가 기준 금액이에요. SKU별 수량은 그대로 쌓이고 있어서, 나중에 필요하면 "
-                    "같은 기준(예: 현재 단가)으로 다시 계산한 추이도 만들 수 있어요."
-                )
+                st.altair_chart(breakdown_bar, width="stretch")
 
-            st.subheader("SKU별 창고-캠프 재고 비교")
-            camp_by_sku = {
-                it["c"].strip().upper(): it for it in data["items"] if it.get("c")
-            }
-            wh_by_sku = {it["sku"].strip().upper(): it for it in wh_items if it.get("sku")}
-            all_skus = set(camp_by_sku) | set(wh_by_sku)
-
-            compare_rows = []
-            for sku in all_skus:
-                camp_it = camp_by_sku.get(sku)
-                wh_it = wh_by_sku.get(sku)
-                camp_q = camp_it["q"] if camp_it else 0
-                camp_a = camp_it["a"] if camp_it else 0
-                wh_q = wh_it.get("quantity", 0) if wh_it else 0
-                wh_price = float(wh_it.get("price") or 0) if wh_it else 0
-                wh_a = wh_q * wh_price
-                name = camp_it["n"] if camp_it else wh_it["name"]
-                total_q = wh_q + camp_q
-                # 사용량 조회는 원래 표기(대소문자)를 써야 정확히 매칭된다 (join용 sku는 대문자로 통일돼있음).
-                orig_code = camp_it["c"] if camp_it else wh_it["sku"]
-                weeks, depletion_date = estimate_depletion(total_q, orig_code)
-                compare_rows.append(
-                    {
-                        "SKU": sku,
-                        "품명": name,
-                        "물류창고 수량": wh_q,
-                        "캠프 재고 수량": camp_q,
-                        "합계 수량": total_q,
-                        "재고 금액": wh_a + camp_a,
-                        "주 사용량": weekly_usage_rate(orig_code),
-                        "소진 예상(주)": weeks,
-                        "예상 소진일": depletion_date.isoformat() if depletion_date else None,
-                    }
-                )
-            compare_df = pd.DataFrame(compare_rows).sort_values("재고 금액", ascending=False)
-
-            compare_search = st.text_input("SKU 또는 품명으로 검색", "", key="total_compare_search")
-            if compare_search.strip():
-                q = compare_search.strip().lower()
-                compare_df = compare_df[
-                    compare_df["SKU"].str.lower().str.contains(q, regex=False)
-                    | compare_df["품명"].str.lower().str.contains(q, regex=False)
-                ]
-            st.caption(
-                f"{len(compare_df):,}개 SKU (창고·캠프 어느 한쪽에라도 있는 품목 전체). "
-                "주 사용량/예상 소진일은 캠프 사용량 엑셀 기준(전체 캠프 합산)이에요."
-            )
-            display_compare_df = compare_df.copy()
-            display_compare_df["예상 소진일"] = display_compare_df["예상 소진일"].fillna("-")
-            st.dataframe(
-                display_compare_df,
-                hide_index=True,
-                column_config={
-                    "물류창고 수량": st.column_config.NumberColumn(format="%,d개"),
-                    "캠프 재고 수량": st.column_config.NumberColumn(format="%,d개"),
-                    "합계 수량": st.column_config.NumberColumn(format="%,d개"),
-                    "재고 금액": st.column_config.NumberColumn(format="₩%,d"),
-                    "주 사용량": st.column_config.NumberColumn(format="%.1f개/주"),
-                    "소진 예상(주)": st.column_config.NumberColumn(format="%.1f주"),
-                },
-            )
-
-with tab_purchase:
-    st.caption(
-        "품목을 선택하고 받을 캠프를 지정해서 물류창고에 발주를 요청할 수 있어요. "
-        "승인은 \"창고에서 발송 준비\" 단계이며, 박스히어로 실제 재고는 여기서 자동으로 바뀌지 않아요 "
-        "(창고 쪽은 수동으로 처리해주세요). 입고완료를 눌러야 캠프 재고에 반영됩니다."
-    )
-
-    po_my_name = st.text_input(
-        "내 이름", value=st.session_state.get("transfer_my_name", ""), key="po_my_name_input"
-    )
-    st.session_state["transfer_my_name"] = po_my_name
-
-    po_camp = st.selectbox("받는 캠프", data["campsOrder"], key="po_camp_select")
-    st.caption(f"아래에서 담는 품목은 모두 **{po_camp}** 앞으로 발주돼요. 캠프를 바꾸면 그 다음부터 담는 품목에 적용돼요.")
-
-    if "po_cart" not in st.session_state:
-        st.session_state["po_cart"] = []
-
-    st.subheader("발주 목록에 담기")
-    po_query = st.text_input("발주할 품목명 또는 번호 입력", "", key="po_query")
-    po_selected = None
-    if po_query.strip():
-        q = po_query.strip().lower()
-        all_po_candidates = [it for it in data["items"] if q in it["n"].lower() or q in str(it["c"]).lower()]
-        po_candidates = all_po_candidates[:15]
-        if po_candidates:
-            if len(all_po_candidates) > len(po_candidates):
-                st.caption(
-                    f"검색 결과 {len(all_po_candidates)}건 중 상위 {len(po_candidates)}개만 표시했어요. "
-                    "검색어를 더 구체적으로 입력하면 찾는 품목이 더 잘 보여요."
-                )
-            po_options = {f"{it['n']} ({it['c']})": it for it in po_candidates}
-            po_picked_label = st.radio("검색 결과", list(po_options.keys()), key="po_radio")
-            po_selected = po_options[po_picked_label]
-        else:
-            st.info("일치하는 품목이 없습니다.", icon=":material/search_off:")
-
-    if po_selected:
-        po_item_code = po_selected["c"]
-        po_item_name = po_selected["n"]
-        with st.form(f"po_form_{po_item_code}_{po_camp}"):
-            st.caption(f"받는 캠프: **{po_camp}**")
-            po_camp_avg = camp_weekly_usage_rate(po_item_code, po_camp)
-            if po_camp_avg:
-                st.caption(f"{po_camp}의 이 품목 주 평균 사용량: {po_camp_avg:g}개/주")
-            else:
-                st.caption(f"{po_camp}의 이 품목 사용량 데이터가 없어요 (2배 초과 검증을 생략해요).")
-            po_qty = st.number_input("발주 수량", min_value=1, step=1, value=1, key=f"po_qty_{po_item_code}")
-            po_threshold = po_camp_avg * 2 if po_camp_avg else None
-            po_over = po_threshold is not None and po_qty > po_threshold
-            po_reason = ""
-            if po_over:
-                st.warning(
-                    f"주 평균 사용량({po_camp_avg:g}개)의 2배({po_threshold:g}개)를 초과하는 발주예요. "
-                    "사유를 입력해주세요.",
-                    icon=":material/warning:",
-                )
-                po_reason = st.text_area("발주 사유", key=f"po_reason_{po_item_code}")
-            if st.form_submit_button("목록에 추가", icon=":material/add:"):
-                if po_over and not po_reason.strip():
-                    st.error("주 평균 사용량의 2배를 초과하는 발주는 사유를 입력해야 해요.", icon=":material/error:")
+                st.subheader("주별 재고 금액 추이 (창고 + 캠프)")
+                trend_raw = load_inventory_value_trend()
+                if trend_raw.empty:
+                    st.caption("아직 쌓인 현황이 없어요. 이번 주부터 자동으로 쌓여요 (매주 처음 접속할 때 그 주의 최신 값으로 갱신돼요).")
                 else:
-                    st.session_state["po_cart"].append(
+                    trend_wide = trend_raw.pivot_table(
+                        index="period_label", columns="source", values="amt", aggfunc="sum", fill_value=0
+                    ).reset_index()
+                    for col in ("camp", "warehouse"):
+                        if col not in trend_wide.columns:
+                            trend_wide[col] = 0
+                    trend_wide["전체"] = trend_wide["camp"] + trend_wide["warehouse"]
+                    trend_wide = trend_wide.rename(columns={"camp": "캠프", "warehouse": "물류창고"})
+                    trend_long = trend_wide.melt(
+                        id_vars="period_label", value_vars=["전체", "캠프", "물류창고"], var_name="구분", value_name="재고 금액"
+                    )
+                    trend_line = (
+                        alt.Chart(trend_long)
+                        .mark_line(point=True, strokeWidth=2)
+                        .encode(
+                            x=alt.X(
+                                "period_label:O",
+                                sort=None,
+                                title=None,
+                                axis=alt.Axis(labelColor=CHART_MUTED, labelFontSize=11, domain=False, ticks=False, grid=False),
+                            ),
+                            y=alt.Y(
+                                "재고 금액:Q",
+                                title=None,
+                                axis=alt.Axis(
+                                    labelColor=CHART_MUTED, labelFontSize=11, domain=False, ticks=False,
+                                    gridColor=CHART_GRID, tickCount=4,
+                                ),
+                            ),
+                            color=alt.Color("구분:N", scale=alt.Scale(scheme="category10"), legend=alt.Legend(title=None, labelColor=CHART_MUTED)),
+                            tooltip=[alt.Tooltip("period_label:O", title="주차"), alt.Tooltip("구분:N"), alt.Tooltip("재고 금액:Q", format=",.0f")],
+                        )
+                        .properties(height=240)
+                        .configure_view(strokeWidth=0)
+                        .configure(background="transparent")
+                    )
+                    st.altair_chart(trend_line, width="stretch")
+                    st.caption(
+                        "스냅샷 시점 단가 기준 금액이에요. SKU별 수량은 그대로 쌓이고 있어서, 나중에 필요하면 "
+                        "같은 기준(예: 현재 단가)으로 다시 계산한 추이도 만들 수 있어요."
+                    )
+
+                st.subheader("SKU별 창고-캠프 재고 비교")
+                camp_by_sku = {
+                    it["c"].strip().upper(): it for it in data["items"] if it.get("c")
+                }
+                wh_by_sku = {it["sku"].strip().upper(): it for it in wh_items if it.get("sku")}
+                all_skus = set(camp_by_sku) | set(wh_by_sku)
+
+                compare_rows = []
+                for sku in all_skus:
+                    camp_it = camp_by_sku.get(sku)
+                    wh_it = wh_by_sku.get(sku)
+                    camp_q = camp_it["q"] if camp_it else 0
+                    camp_a = camp_it["a"] if camp_it else 0
+                    wh_q = wh_it.get("quantity", 0) if wh_it else 0
+                    wh_price = float(wh_it.get("price") or 0) if wh_it else 0
+                    wh_a = wh_q * wh_price
+                    name = camp_it["n"] if camp_it else wh_it["name"]
+                    total_q = wh_q + camp_q
+                    # 사용량 조회는 원래 표기(대소문자)를 써야 정확히 매칭된다 (join용 sku는 대문자로 통일돼있음).
+                    orig_code = camp_it["c"] if camp_it else wh_it["sku"]
+                    weeks, depletion_date = estimate_depletion(total_q, orig_code)
+                    compare_rows.append(
                         {
-                            "item_code": po_item_code,
-                            "item_name": po_item_name,
-                            "camp": po_camp,
-                            "qty": int(po_qty),
-                            "weekly_avg": po_camp_avg,
-                            "reason": po_reason.strip(),
+                            "SKU": sku,
+                            "품명": name,
+                            "물류창고 수량": wh_q,
+                            "캠프 재고 수량": camp_q,
+                            "합계 수량": total_q,
+                            "재고 금액": wh_a + camp_a,
+                            "주 사용량": weekly_usage_rate(orig_code),
+                            "소진 예상(주)": weeks,
+                            "예상 소진일": depletion_date.isoformat() if depletion_date else None,
                         }
                     )
-                    # 담기에 성공했을 때만 입력칸을 비운다 (검증 실패 시에는 입력한 값이 유지돼야 함)
-                    st.session_state.pop(f"po_qty_{po_item_code}", None)
-                    st.session_state.pop(f"po_reason_{po_item_code}", None)
+                compare_df = pd.DataFrame(compare_rows).sort_values("재고 금액", ascending=False)
+
+                compare_search = st.text_input("SKU 또는 품명으로 검색", "", key="total_compare_search")
+                if compare_search.strip():
+                    q = compare_search.strip().lower()
+                    compare_df = compare_df[
+                        compare_df["SKU"].str.lower().str.contains(q, regex=False)
+                        | compare_df["품명"].str.lower().str.contains(q, regex=False)
+                    ]
+                st.caption(
+                    f"{len(compare_df):,}개 SKU (창고·캠프 어느 한쪽에라도 있는 품목 전체). "
+                    "주 사용량/예상 소진일은 캠프 사용량 엑셀 기준(전체 캠프 합산)이에요."
+                )
+                display_compare_df = compare_df.copy()
+                display_compare_df["예상 소진일"] = display_compare_df["예상 소진일"].fillna("-")
+                st.dataframe(
+                    display_compare_df,
+                    hide_index=True,
+                    column_config={
+                        "물류창고 수량": st.column_config.NumberColumn(format="%,d개"),
+                        "캠프 재고 수량": st.column_config.NumberColumn(format="%,d개"),
+                        "합계 수량": st.column_config.NumberColumn(format="%,d개"),
+                        "재고 금액": st.column_config.NumberColumn(format="₩%,d"),
+                        "주 사용량": st.column_config.NumberColumn(format="%.1f개/주"),
+                        "소진 예상(주)": st.column_config.NumberColumn(format="%.1f주"),
+                    },
+                )
+
+if "purchase" in tabs:
+    with tabs["purchase"]:
+        st.caption(
+            "품목을 선택하고 받을 캠프를 지정해서 물류창고에 발주를 요청할 수 있어요. "
+            "승인은 \"창고에서 발송 준비\" 단계이며, 박스히어로 실제 재고는 여기서 자동으로 바뀌지 않아요 "
+            "(창고 쪽은 수동으로 처리해주세요). 입고완료를 눌러야 캠프 재고에 반영됩니다."
+        )
+
+        po_my_name = st.text_input(
+            "내 이름", value=st.session_state.get("transfer_my_name", ""), key="po_my_name_input"
+        )
+        st.session_state["transfer_my_name"] = po_my_name
+
+        po_camp = st.selectbox("받는 캠프", data["campsOrder"], key="po_camp_select")
+        st.caption(f"아래에서 담는 품목은 모두 **{po_camp}** 앞으로 발주돼요. 캠프를 바꾸면 그 다음부터 담는 품목에 적용돼요.")
+
+        if "po_cart" not in st.session_state:
+            st.session_state["po_cart"] = []
+
+        st.subheader("발주 목록에 담기")
+        po_query = st.text_input("발주할 품목명 또는 번호 입력", "", key="po_query")
+        po_selected = None
+        if po_query.strip():
+            q = po_query.strip().lower()
+            all_po_candidates = [it for it in data["items"] if q in it["n"].lower() or q in str(it["c"]).lower()]
+            po_candidates = all_po_candidates[:15]
+            if po_candidates:
+                if len(all_po_candidates) > len(po_candidates):
+                    st.caption(
+                        f"검색 결과 {len(all_po_candidates)}건 중 상위 {len(po_candidates)}개만 표시했어요. "
+                        "검색어를 더 구체적으로 입력하면 찾는 품목이 더 잘 보여요."
+                    )
+                po_options = {f"{it['n']} ({it['c']})": it for it in po_candidates}
+                po_picked_label = st.radio("검색 결과", list(po_options.keys()), key="po_radio")
+                po_selected = po_options[po_picked_label]
+            else:
+                st.info("일치하는 품목이 없습니다.", icon=":material/search_off:")
+
+        if po_selected:
+            po_item_code = po_selected["c"]
+            po_item_name = po_selected["n"]
+            with st.form(f"po_form_{po_item_code}_{po_camp}"):
+                st.caption(f"받는 캠프: **{po_camp}**")
+                po_camp_avg = camp_weekly_usage_rate(po_item_code, po_camp)
+                if po_camp_avg:
+                    st.caption(f"{po_camp}의 이 품목 주 평균 사용량: {po_camp_avg:g}개/주")
+                else:
+                    st.caption(f"{po_camp}의 이 품목 사용량 데이터가 없어요 (2배 초과 검증을 생략해요).")
+                po_qty = st.number_input("발주 수량", min_value=1, step=1, value=1, key=f"po_qty_{po_item_code}")
+                po_threshold = po_camp_avg * 2 if po_camp_avg else None
+                po_over = po_threshold is not None and po_qty > po_threshold
+                po_reason = ""
+                if po_over:
+                    st.warning(
+                        f"주 평균 사용량({po_camp_avg:g}개)의 2배({po_threshold:g}개)를 초과하는 발주예요. "
+                        "사유를 입력해주세요.",
+                        icon=":material/warning:",
+                    )
+                    po_reason = st.text_area("발주 사유", key=f"po_reason_{po_item_code}")
+                if st.form_submit_button("목록에 추가", icon=":material/add:"):
+                    if po_over and not po_reason.strip():
+                        st.error("주 평균 사용량의 2배를 초과하는 발주는 사유를 입력해야 해요.", icon=":material/error:")
+                    else:
+                        st.session_state["po_cart"].append(
+                            {
+                                "item_code": po_item_code,
+                                "item_name": po_item_name,
+                                "camp": po_camp,
+                                "qty": int(po_qty),
+                                "weekly_avg": po_camp_avg,
+                                "reason": po_reason.strip(),
+                            }
+                        )
+                        # 담기에 성공했을 때만 입력칸을 비운다 (검증 실패 시에는 입력한 값이 유지돼야 함)
+                        st.session_state.pop(f"po_qty_{po_item_code}", None)
+                        st.session_state.pop(f"po_reason_{po_item_code}", None)
+                        st.rerun()
+
+        if st.session_state["po_cart"]:
+            st.subheader(f"담긴 발주 목록 ({len(st.session_state['po_cart'])}건)")
+            for i, row in enumerate(st.session_state["po_cart"]):
+                cc0, cc1, cc2 = st.columns([1, 5, 1])
+                cc0.badge(str(i + 1), color="gray")
+                avg_suffix = f" (주평균 {row['weekly_avg']:g}개)" if row["weekly_avg"] else ""
+                reason_suffix = f" · 사유: {row['reason']}" if row["reason"] else ""
+                cc1.write(
+                    f"{row['item_name']} ({row['item_code']}) → {row['camp']} · {row['qty']}개{avg_suffix}{reason_suffix}"
+                )
+                if cc2.button("삭제", key=f"po_cart_remove_{i}"):
+                    st.session_state["po_cart"].pop(i)
                     st.rerun()
 
-    if st.session_state["po_cart"]:
-        st.subheader(f"담긴 발주 목록 ({len(st.session_state['po_cart'])}건)")
-        for i, row in enumerate(st.session_state["po_cart"]):
-            cc0, cc1, cc2 = st.columns([1, 5, 1])
-            cc0.badge(str(i + 1), color="gray")
-            avg_suffix = f" (주평균 {row['weekly_avg']:g}개)" if row["weekly_avg"] else ""
-            reason_suffix = f" · 사유: {row['reason']}" if row["reason"] else ""
-            cc1.write(
-                f"{row['item_name']} ({row['item_code']}) → {row['camp']} · {row['qty']}개{avg_suffix}{reason_suffix}"
-            )
-            if cc2.button("삭제", key=f"po_cart_remove_{i}"):
-                st.session_state["po_cart"].pop(i)
-                st.rerun()
-
-        if st.button("전체 발주 요청 제출", type="primary", icon=":material/send:"):
-            if not po_my_name.strip():
-                st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
-            else:
-                for row in st.session_state["po_cart"]:
-                    create_warehouse_order(
-                        row["item_code"], row["item_name"], row["camp"], row["qty"],
-                        row["weekly_avg"], row["reason"], po_my_name.strip(),
-                    )
-                st.session_state["po_cart"] = []
-                st.success("발주 요청을 모두 등록했습니다.", icon=":material/send:")
-                st.cache_data.clear()
-                st.rerun()
-
-    po_df = list_warehouse_orders()
-    can_approve_po = auth["role"] == "admin" or my_login_camp == "물류창고"
-    if my_login_camp and my_login_camp != "물류창고" and not po_df.empty:
-        # 캠프로 로그인했으면(물류창고 제외) 내 캠프로 오는 발주만 보여준다.
-        po_df = po_df[po_df["to_camp"] == my_login_camp]
-    po_requested = po_df[po_df["status"] == "requested"] if not po_df.empty else po_df
-    po_in_transit = po_df[po_df["status"] == "in_transit"] if not po_df.empty else po_df
-    po_done = po_df[po_df["status"].isin(["completed", "rejected"])] if not po_df.empty else po_df
-
-    if not po_requested.empty:
-        st.markdown("**요청중**")
-        if can_approve_po:
-            for _, r in po_requested.iterrows():
-                c0, c1, c2, c3, c4 = st.columns([0.5, 1, 4, 1, 1])
-                c0.checkbox("", key=f"po_bulk_chk_{r['id']}", label_visibility="collapsed")
-                c1.badge("요청중", icon=":material/schedule:", color="orange")
-                reason_suffix = f" · 사유: {r['reason']}" if r.get("reason") else ""
-                c2.write(
-                    f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · "
-                    f"요청자: {r['requested_by']}{reason_suffix}"
-                )
-                if c3.button("승인", key=f"po_approve_{r['id']}"):
-                    if not po_my_name.strip():
-                        st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
-                    else:
-                        approve_warehouse_order(r["id"], po_my_name.strip())
-                        st.cache_data.clear()
-                        st.rerun()
-                if c4.button("거절", key=f"po_reject_{r['id']}"):
-                    if not po_my_name.strip():
-                        st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
-                    else:
-                        reject_warehouse_order(r["id"], po_my_name.strip())
-                        st.cache_data.clear()
-                        st.rerun()
-
-            po_bulk_ids = [
-                int(r["id"]) for _, r in po_requested.iterrows() if st.session_state.get(f"po_bulk_chk_{r['id']}")
-            ]
-            if po_bulk_ids:
-                if st.button(
-                    f"체크한 {len(po_bulk_ids)}건 일괄 승인", type="primary", icon=":material/done_all:",
-                    key="po_bulk_approve_btn",
-                ):
-                    if not po_my_name.strip():
-                        st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
-                    else:
-                        for oid in po_bulk_ids:
-                            approve_warehouse_order(oid, po_my_name.strip())
-                        st.success(f"{len(po_bulk_ids)}건을 일괄 승인했습니다.", icon=":material/done_all:")
-                        st.cache_data.clear()
-                        st.rerun()
-        else:
-            # 승인/거절은 물류창고(또는 관리자)만 할 수 있어서, 캠프 로그인에는 진행 상황만 보여준다.
-            for _, r in po_requested.iterrows():
-                reason_suffix = f" · 사유: {r['reason']}" if r.get("reason") else ""
-                st.caption(
-                    f":material/schedule: {r['item_name']} ({r['item_code']}) → {r['to_camp']} · "
-                    f"{int(r['qty'])}개 · 요청자: {r['requested_by']}{reason_suffix} (창고 승인 대기중)"
-                )
-
-    if not po_in_transit.empty:
-        st.markdown("**승인됨 (입고 대기)**")
-        for _, r in po_in_transit.iterrows():
-            can_receive = auth["role"] == "admin" or my_login_camp == r["to_camp"]
-            if can_receive:
-                render_incoming_warehouse_order_row(r, data, po_my_name)
-            else:
-                # 입고완료는 실제로 받는 캠프(또는 관리자)만 할 수 있어서, 그 외에는 진행 상황만 보여준다.
-                ic0, ic1 = st.columns([1, 6])
-                ic0.badge("승인됨", icon=":material/local_shipping:", color="blue")
-                ic1.write(
-                    f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · "
-                    f"승인자: {r['approved_by']}"
-                )
-
-    if not po_done.empty:
-        with st.expander(f"완료/거절 내역 ({len(po_done)}건)", icon=":material/history:"):
-            for _, r in po_done.iterrows():
-                is_done = r["status"] == "completed"
-                who = r["received_by"] if is_done else r["approved_by"]
-                dc0, dc1 = st.columns([1, 5])
-                if is_done:
-                    dc0.badge("입고완료", icon=":material/check_circle:", color="green")
+            if st.button("전체 발주 요청 제출", type="primary", icon=":material/send:"):
+                if not po_my_name.strip():
+                    st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
                 else:
-                    dc0.badge("거절", icon=":material/cancel:", color="red")
-                reason_suffix = f" · 사유: {r['reason']}" if r.get("reason") else ""
-                dc1.caption(
-                    f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · {who}{reason_suffix}"
-                )
+                    for row in st.session_state["po_cart"]:
+                        create_warehouse_order(
+                            row["item_code"], row["item_name"], row["camp"], row["qty"],
+                            row["weekly_avg"], row["reason"], po_my_name.strip(),
+                        )
+                    st.session_state["po_cart"] = []
+                    st.success("발주 요청을 모두 등록했습니다.", icon=":material/send:")
+                    st.cache_data.clear()
+                    st.rerun()
 
-with tab_warehouse:
-    if not get_boxhero_token():
-        st.info(
-            "박스히어로 API 토큰이 설정되지 않았어요. .streamlit/secrets.toml.example을 참고해 등록해주세요.",
-            icon=":material/link_off:",
-        )
-    else:
-        try:
-            with st.spinner("박스히어로에서 창고 데이터를 가져오는 중이에요..."):
-                wh_locations = fetch_boxhero_locations()
-                wh_items = fetch_boxhero_items()
-        except Exception as e:
-            st.error(f"박스히어로 연동 중 문제가 발생했습니다: {e}", icon=":material/error:")
-        else:
-            warehouse_qty = sum(it.get("quantity", 0) for it in wh_items)
-            warehouse_amt = sum(it.get("quantity", 0) * float(it.get("price") or 0) for it in wh_items)
-            warehouse_name = wh_locations[0]["name"] if wh_locations else "물류창고"
+        po_df = list_warehouse_orders()
+        can_approve_po = auth["role"] == "admin" or my_login_camp == "물류창고"
+        if my_login_camp and my_login_camp != "물류창고" and not po_df.empty:
+            # 캠프로 로그인했으면(물류창고 제외) 내 캠프로 오는 발주만 보여준다.
+            po_df = po_df[po_df["to_camp"] == my_login_camp]
+        po_requested = po_df[po_df["status"] == "requested"] if not po_df.empty else po_df
+        po_in_transit = po_df[po_df["status"] == "in_transit"] if not po_df.empty else po_df
+        po_done = po_df[po_df["status"].isin(["completed", "rejected"])] if not po_df.empty else po_df
 
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("창고 재고 수량", f"{fmt_int(warehouse_qty)}개", border=True)
-            k2.metric("창고 재고 금액", fmt_won(warehouse_amt), border=True)
-            k3.metric("창고 품목 수", f"{len(wh_items):,}종", border=True)
-            k4.metric("창고", warehouse_name, border=True)
-            st.caption(
-                "박스히어로 API에서 5분 주기로 새로 가져온 데이터예요. "
-                "창고 재고 금액은 원가(cost) 입력이 대부분 비어있어 판매가(price) 기준으로 계산했어요."
-            )
+        if not po_requested.empty:
+            st.markdown("**요청중**")
+            if can_approve_po:
+                for _, r in po_requested.iterrows():
+                    c0, c1, c2, c3, c4 = st.columns([0.5, 1, 4, 1, 1])
+                    c0.checkbox("", key=f"po_bulk_chk_{r['id']}", label_visibility="collapsed")
+                    c1.badge("요청중", icon=":material/schedule:", color="orange")
+                    reason_suffix = f" · 사유: {r['reason']}" if r.get("reason") else ""
+                    c2.write(
+                        f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · "
+                        f"요청자: {r['requested_by']}{reason_suffix}"
+                    )
+                    if c3.button("승인", key=f"po_approve_{r['id']}"):
+                        if not po_my_name.strip():
+                            st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
+                        else:
+                            approve_warehouse_order(r["id"], po_my_name.strip())
+                            st.cache_data.clear()
+                            st.rerun()
+                    if c4.button("거절", key=f"po_reject_{r['id']}"):
+                        if not po_my_name.strip():
+                            st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
+                        else:
+                            reject_warehouse_order(r["id"], po_my_name.strip())
+                            st.cache_data.clear()
+                            st.rerun()
 
-            _today_str = datetime.now().date().isoformat()
-            if st.session_state.get("_wh_snap_date") != _today_str:
-                try:
-                    save_warehouse_snapshot(warehouse_qty, warehouse_amt, len(wh_items))
-                    st.session_state["_wh_snap_date"] = _today_str
-                except Exception:
-                    pass  # 스냅샷 저장에 실패해도 화면 표시는 계속 진행
-
-            _cur_period_label = current_inventory_period()[2]
-            if st.session_state.get("_wh_value_snap_period") != _cur_period_label:
-                try:
-                    save_inventory_value_snapshot("warehouse", build_warehouse_value_snapshot_rows(wh_items))
-                    st.session_state["_wh_value_snap_period"] = _cur_period_label
-                except Exception:
-                    pass  # 스냅샷 저장에 실패해도 화면 표시는 계속 진행
-
-            st.subheader("월별 물류창고 재고 금액")
-            snapshots = load_warehouse_snapshots()
-            if snapshots.empty:
-                st.caption("아직 쌓인 스냅샷이 없어요.")
-            else:
-                snapshots = snapshots.copy()
-                snapshots["월"] = pd.to_datetime(snapshots["snapshot_date"]).dt.strftime("%Y-%m")
-                monthly_wh = snapshots.groupby("월", as_index=False).last()[["월", "total_amt"]]
-                monthly_wh.columns = ["월", "재고 금액"]
-                st.altair_chart(render_trend_chart(monthly_wh, "월", "재고 금액"), width="stretch")
-                st.dataframe(
-                    monthly_wh.sort_values("월", ascending=False),
-                    hide_index=True,
-                    column_config={"재고 금액": st.column_config.NumberColumn(format="₩%,d")},
-                )
-                st.caption(
-                    "박스히어로 API는 현재 시점 재고만 알려줘서, 창고 현황 탭을 열 때마다 그날의 "
-                    "스냅샷을 기록해 추이를 쌓고 있어요. 과거 데이터는 없어 오늘부터 시작돼요."
-                )
-
-            st.subheader("품목별 창고 재고")
-            st.caption("주 사용량/예상 소진일은 캠프 사용량 엑셀 기준(전체 캠프 합산)이라, 사용량 데이터가 없는 SKU는 \"-\"로 표시돼요.")
-            wh_search = st.text_input("품목명 또는 SKU로 검색", "", key="warehouse_search")
-            wh_rows = []
-            for it in wh_items:
-                sku = it["sku"]
-                qty = it.get("quantity", 0)
-                price = float(it.get("price") or 0)
-                weeks, depletion_date = estimate_depletion(qty, sku)
-                wh_rows.append(
-                    {
-                        "SKU": sku,
-                        "품목명": it["name"],
-                        "재고 수량": qty,
-                        "단가": price,
-                        "재고 금액": qty * price,
-                        "주 사용량": weekly_usage_rate(sku),
-                        "소진 예상(주)": weeks,
-                        "예상 소진일": depletion_date.isoformat() if depletion_date else None,
-                    }
-                )
-            wh_df = pd.DataFrame(wh_rows).sort_values("재고 금액", ascending=False)
-            if wh_search.strip():
-                q = wh_search.strip().lower()
-                wh_df = wh_df[
-                    wh_df["품목명"].str.lower().str.contains(q, regex=False)
-                    | wh_df["SKU"].str.lower().str.contains(q, regex=False)
+                po_bulk_ids = [
+                    int(r["id"]) for _, r in po_requested.iterrows() if st.session_state.get(f"po_bulk_chk_{r['id']}")
                 ]
-            display_wh_df = wh_df.copy()
-            display_wh_df["예상 소진일"] = display_wh_df["예상 소진일"].fillna("-")
-            st.dataframe(
-                display_wh_df,
-                hide_index=True,
-                column_config={
-                    "재고 수량": st.column_config.NumberColumn(format="%,d개"),
-                    "단가": st.column_config.NumberColumn(format="₩%,d"),
-                    "재고 금액": st.column_config.NumberColumn(format="₩%,d"),
-                    "주 사용량": st.column_config.NumberColumn(format="%.1f개/주"),
-                    "소진 예상(주)": st.column_config.NumberColumn(format="%.1f주"),
-                },
-            )
-
-            st.subheader("최근 30일 출고 금액")
-            st.caption(
-                "건별 품목 상세를 하나씩 조회해서 계산하기 때문에 건수가 많으면 1~2분 걸려요. "
-                "그래서 자동으로 돌리지 않고, 버튼을 눌렀을 때만 계산해요 (다른 탭 조작 속도에 영향 없게)."
-            )
-            if st.button("출고 이력 불러오기 / 새로고침", key="load_out_tx_btn", icon=":material/refresh:"):
-                try:
-                    with st.spinner("건별 품목 상세를 조회해 판매가 기준 출고 금액을 계산하는 중이에요... (건수가 많으면 1~2분 걸릴 수 있어요)"):
-                        st.session_state["wh_out_txs"] = fetch_boxhero_recent_out_transactions(days=30)
-                except Exception as e:
-                    st.error(f"출고 이력을 가져오는 중 문제가 발생했습니다: {e}", icon=":material/error:")
-
-            out_txs = st.session_state.get("wh_out_txs")
-            if out_txs is None:
-                st.caption("위 버튼을 눌러 최근 30일 출고 이력을 불러오세요.")
+                if po_bulk_ids:
+                    if st.button(
+                        f"체크한 {len(po_bulk_ids)}건 일괄 승인", type="primary", icon=":material/done_all:",
+                        key="po_bulk_approve_btn",
+                    ):
+                        if not po_my_name.strip():
+                            st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
+                        else:
+                            for oid in po_bulk_ids:
+                                approve_warehouse_order(oid, po_my_name.strip())
+                            st.success(f"{len(po_bulk_ids)}건을 일괄 승인했습니다.", icon=":material/done_all:")
+                            st.cache_data.clear()
+                            st.rerun()
             else:
-                if not out_txs:
-                    st.caption("최근 30일간 출고 이력이 없어요.")
-                else:
-                    total_out_amt = sum(tx["amt"] for tx in out_txs)
-                    st.caption(f"최근 30일 출고 금액 합계: {fmt_won(total_out_amt)} (판매가 기준, {len(out_txs):,}건)")
-
-                    daily = {}
-                    for tx in out_txs:
-                        day = tx["transaction_time"][:10]
-                        daily[day] = daily.get(day, 0) + tx["amt"]
-                    daily_df = pd.DataFrame(sorted(daily.items()), columns=["날짜", "출고 금액"])
-                    st.altair_chart(render_trend_chart(daily_df, "날짜", "출고 금액"), width="stretch")
-
-                    tx_rows = [
-                        {
-                            "일시": tx["transaction_time"][:16].replace("T", " "),
-                            "출고 금액": tx["amt"],
-                            "출고 수량": abs(tx.get("total_quantity", 0)),
-                            "품목 수": tx.get("count_of_items", 0),
-                            "메모": tx.get("memo", ""),
-                        }
-                        for tx in out_txs
-                    ]
-                    st.dataframe(
-                        pd.DataFrame(tx_rows),
-                        hide_index=True,
-                        column_config={
-                            "출고 금액": st.column_config.NumberColumn(format="₩%,d"),
-                            "출고 수량": st.column_config.NumberColumn(format="%,d개"),
-                        },
+                # 승인/거절은 물류창고(또는 관리자)만 할 수 있어서, 캠프 로그인에는 진행 상황만 보여준다.
+                for _, r in po_requested.iterrows():
+                    reason_suffix = f" · 사유: {r['reason']}" if r.get("reason") else ""
+                    st.caption(
+                        f":material/schedule: {r['item_name']} ({r['item_code']}) → {r['to_camp']} · "
+                        f"{int(r['qty'])}개 · 요청자: {r['requested_by']}{reason_suffix} (창고 승인 대기중)"
                     )
+
+        if not po_in_transit.empty:
+            st.markdown("**승인됨 (입고 대기)**")
+            for _, r in po_in_transit.iterrows():
+                can_receive = auth["role"] == "admin" or my_login_camp == r["to_camp"]
+                if can_receive:
+                    render_incoming_warehouse_order_row(r, data, po_my_name)
+                else:
+                    # 입고완료는 실제로 받는 캠프(또는 관리자)만 할 수 있어서, 그 외에는 진행 상황만 보여준다.
+                    ic0, ic1 = st.columns([1, 6])
+                    ic0.badge("승인됨", icon=":material/local_shipping:", color="blue")
+                    ic1.write(
+                        f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · "
+                        f"승인자: {r['approved_by']}"
+                    )
+
+        if not po_done.empty:
+            with st.expander(f"완료/거절 내역 ({len(po_done)}건)", icon=":material/history:"):
+                for _, r in po_done.iterrows():
+                    is_done = r["status"] == "completed"
+                    who = r["received_by"] if is_done else r["approved_by"]
+                    dc0, dc1 = st.columns([1, 5])
+                    if is_done:
+                        dc0.badge("입고완료", icon=":material/check_circle:", color="green")
+                    else:
+                        dc0.badge("거절", icon=":material/cancel:", color="red")
+                    reason_suffix = f" · 사유: {r['reason']}" if r.get("reason") else ""
+                    dc1.caption(
+                        f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · {who}{reason_suffix}"
+                    )
+
+if "warehouse" in tabs:
+    with tabs["warehouse"]:
+        if not get_boxhero_token():
+            st.info(
+                "박스히어로 API 토큰이 설정되지 않았어요. .streamlit/secrets.toml.example을 참고해 등록해주세요.",
+                icon=":material/link_off:",
+            )
+        else:
+            try:
+                with st.spinner("박스히어로에서 창고 데이터를 가져오는 중이에요..."):
+                    wh_locations = fetch_boxhero_locations()
+                    wh_items = fetch_boxhero_items()
+            except Exception as e:
+                st.error(f"박스히어로 연동 중 문제가 발생했습니다: {e}", icon=":material/error:")
+            else:
+                warehouse_qty = sum(it.get("quantity", 0) for it in wh_items)
+                warehouse_amt = sum(it.get("quantity", 0) * float(it.get("price") or 0) for it in wh_items)
+                warehouse_name = wh_locations[0]["name"] if wh_locations else "물류창고"
+
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("창고 재고 수량", f"{fmt_int(warehouse_qty)}개", border=True)
+                k2.metric("창고 재고 금액", fmt_won(warehouse_amt), border=True)
+                k3.metric("창고 품목 수", f"{len(wh_items):,}종", border=True)
+                k4.metric("창고", warehouse_name, border=True)
+                st.caption(
+                    "박스히어로 API에서 5분 주기로 새로 가져온 데이터예요. "
+                    "창고 재고 금액은 원가(cost) 입력이 대부분 비어있어 판매가(price) 기준으로 계산했어요."
+                )
+
+                _today_str = datetime.now().date().isoformat()
+                if st.session_state.get("_wh_snap_date") != _today_str:
+                    try:
+                        save_warehouse_snapshot(warehouse_qty, warehouse_amt, len(wh_items))
+                        st.session_state["_wh_snap_date"] = _today_str
+                    except Exception:
+                        pass  # 스냅샷 저장에 실패해도 화면 표시는 계속 진행
+
+                _cur_period_label = current_inventory_period()[2]
+                if st.session_state.get("_wh_value_snap_period") != _cur_period_label:
+                    try:
+                        save_inventory_value_snapshot("warehouse", build_warehouse_value_snapshot_rows(wh_items))
+                        st.session_state["_wh_value_snap_period"] = _cur_period_label
+                    except Exception:
+                        pass  # 스냅샷 저장에 실패해도 화면 표시는 계속 진행
+
+                st.subheader("월별 물류창고 재고 금액")
+                snapshots = load_warehouse_snapshots()
+                if snapshots.empty:
+                    st.caption("아직 쌓인 스냅샷이 없어요.")
+                else:
+                    snapshots = snapshots.copy()
+                    snapshots["월"] = pd.to_datetime(snapshots["snapshot_date"]).dt.strftime("%Y-%m")
+                    monthly_wh = snapshots.groupby("월", as_index=False).last()[["월", "total_amt"]]
+                    monthly_wh.columns = ["월", "재고 금액"]
+                    st.altair_chart(render_trend_chart(monthly_wh, "월", "재고 금액"), width="stretch")
+                    st.dataframe(
+                        monthly_wh.sort_values("월", ascending=False),
+                        hide_index=True,
+                        column_config={"재고 금액": st.column_config.NumberColumn(format="₩%,d")},
+                    )
+                    st.caption(
+                        "박스히어로 API는 현재 시점 재고만 알려줘서, 창고 현황 탭을 열 때마다 그날의 "
+                        "스냅샷을 기록해 추이를 쌓고 있어요. 과거 데이터는 없어 오늘부터 시작돼요."
+                    )
+
+                st.subheader("품목별 창고 재고")
+                st.caption("주 사용량/예상 소진일은 캠프 사용량 엑셀 기준(전체 캠프 합산)이라, 사용량 데이터가 없는 SKU는 \"-\"로 표시돼요.")
+                wh_search = st.text_input("품목명 또는 SKU로 검색", "", key="warehouse_search")
+                wh_rows = []
+                for it in wh_items:
+                    sku = it["sku"]
+                    qty = it.get("quantity", 0)
+                    price = float(it.get("price") or 0)
+                    weeks, depletion_date = estimate_depletion(qty, sku)
+                    wh_rows.append(
+                        {
+                            "SKU": sku,
+                            "품목명": it["name"],
+                            "재고 수량": qty,
+                            "단가": price,
+                            "재고 금액": qty * price,
+                            "주 사용량": weekly_usage_rate(sku),
+                            "소진 예상(주)": weeks,
+                            "예상 소진일": depletion_date.isoformat() if depletion_date else None,
+                        }
+                    )
+                wh_df = pd.DataFrame(wh_rows).sort_values("재고 금액", ascending=False)
+                if wh_search.strip():
+                    q = wh_search.strip().lower()
+                    wh_df = wh_df[
+                        wh_df["품목명"].str.lower().str.contains(q, regex=False)
+                        | wh_df["SKU"].str.lower().str.contains(q, regex=False)
+                    ]
+                display_wh_df = wh_df.copy()
+                display_wh_df["예상 소진일"] = display_wh_df["예상 소진일"].fillna("-")
+                st.dataframe(
+                    display_wh_df,
+                    hide_index=True,
+                    column_config={
+                        "재고 수량": st.column_config.NumberColumn(format="%,d개"),
+                        "단가": st.column_config.NumberColumn(format="₩%,d"),
+                        "재고 금액": st.column_config.NumberColumn(format="₩%,d"),
+                        "주 사용량": st.column_config.NumberColumn(format="%.1f개/주"),
+                        "소진 예상(주)": st.column_config.NumberColumn(format="%.1f주"),
+                    },
+                )
+
+                st.subheader("최근 30일 출고 금액")
+                st.caption(
+                    "건별 품목 상세를 하나씩 조회해서 계산하기 때문에 건수가 많으면 1~2분 걸려요. "
+                    "그래서 자동으로 돌리지 않고, 버튼을 눌렀을 때만 계산해요 (다른 탭 조작 속도에 영향 없게)."
+                )
+                if st.button("출고 이력 불러오기 / 새로고침", key="load_out_tx_btn", icon=":material/refresh:"):
+                    try:
+                        with st.spinner("건별 품목 상세를 조회해 판매가 기준 출고 금액을 계산하는 중이에요... (건수가 많으면 1~2분 걸릴 수 있어요)"):
+                            st.session_state["wh_out_txs"] = fetch_boxhero_recent_out_transactions(days=30)
+                    except Exception as e:
+                        st.error(f"출고 이력을 가져오는 중 문제가 발생했습니다: {e}", icon=":material/error:")
+
+                out_txs = st.session_state.get("wh_out_txs")
+                if out_txs is None:
+                    st.caption("위 버튼을 눌러 최근 30일 출고 이력을 불러오세요.")
+                else:
+                    if not out_txs:
+                        st.caption("최근 30일간 출고 이력이 없어요.")
+                    else:
+                        total_out_amt = sum(tx["amt"] for tx in out_txs)
+                        st.caption(f"최근 30일 출고 금액 합계: {fmt_won(total_out_amt)} (판매가 기준, {len(out_txs):,}건)")
+
+                        daily = {}
+                        for tx in out_txs:
+                            day = tx["transaction_time"][:10]
+                            daily[day] = daily.get(day, 0) + tx["amt"]
+                        daily_df = pd.DataFrame(sorted(daily.items()), columns=["날짜", "출고 금액"])
+                        st.altair_chart(render_trend_chart(daily_df, "날짜", "출고 금액"), width="stretch")
+
+                        tx_rows = [
+                            {
+                                "일시": tx["transaction_time"][:16].replace("T", " "),
+                                "출고 금액": tx["amt"],
+                                "출고 수량": abs(tx.get("total_quantity", 0)),
+                                "품목 수": tx.get("count_of_items", 0),
+                                "메모": tx.get("memo", ""),
+                            }
+                            for tx in out_txs
+                        ]
+                        st.dataframe(
+                            pd.DataFrame(tx_rows),
+                            hide_index=True,
+                            column_config={
+                                "출고 금액": st.column_config.NumberColumn(format="₩%,d"),
+                                "출고 수량": st.column_config.NumberColumn(format="%,d개"),
+                            },
+                        )
 
 st.divider()
 st.caption("업로드한 데이터는 이 앱에 접속하는 모든 사람에게 공유됩니다. 재고 엑셀/사용량 JSON을 다시 올리면 바로 반영돼요.")
