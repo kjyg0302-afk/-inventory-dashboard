@@ -1421,10 +1421,12 @@ def render_login():
         """,
         unsafe_allow_html=True,
     )
-    login_mode = st.radio("로그인 방식", ["캠프로 로그인", "관리자로 로그인"], horizontal=True)
+    login_mode = st.radio(
+        "로그인 방식", ["캠프로 로그인", "물류창고로 로그인", "관리자로 로그인"], horizontal=True
+    )
     with st.form("login_form"):
         if login_mode == "캠프로 로그인":
-            camps = list_camp_credential_names()
+            camps = [c for c in list_camp_credential_names() if c != "물류창고"]
             camp = st.selectbox("캠프", camps) if camps else None
             pin = st.text_input("비밀번호", type="password")
             submitted = st.form_submit_button("로그인", type="primary", icon=":material/login:")
@@ -1433,6 +1435,15 @@ def render_login():
                     st.error("등록된 캠프 계정이 없어요. 관리자에게 문의해주세요.", icon=":material/error:")
                 elif verify_password(pin, get_camp_password_hash(camp)):
                     st.session_state["auth"] = {"role": "camp", "camp": camp}
+                    st.rerun()
+                else:
+                    st.error("비밀번호가 올바르지 않습니다.", icon=":material/error:")
+        elif login_mode == "물류창고로 로그인":
+            pin = st.text_input("비밀번호", type="password")
+            submitted = st.form_submit_button("로그인", type="primary", icon=":material/login:")
+            if submitted:
+                if verify_password(pin, get_camp_password_hash("물류창고")):
+                    st.session_state["auth"] = {"role": "camp", "camp": "물류창고"}
                     st.rerun()
                 else:
                     st.error("비밀번호가 올바르지 않습니다.", icon=":material/error:")
