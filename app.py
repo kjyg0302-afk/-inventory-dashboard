@@ -1083,6 +1083,14 @@ def render_pending_request_row(r, data, my_name, key_prefix=""):
     if c2.button("승인", key=f"{key_prefix}approve_{r['id']}"):
         if not my_name.strip():
             st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
+        elif r["from_camp"] == "물류창고":
+            # 물류창고 재고는 이 앱의 캠프 재고 데이터에 없어서(박스히어로 쪽에서 별도 관리)
+            # 가용재고 검증을 건너뛴다.
+            approve_transfer_request(r["id"], my_name.strip())
+            st.success("승인했습니다. 이동중 상태로 전환됩니다.", icon=":material/task_alt:")
+            list_transfer_requests.clear()
+            list_all_transfer_requests.clear()
+            st.rerun()
         else:
             item = find_item_by_code(data, r["item_code"])
             current_qty = item["x"].get(r["from_camp"], [0, 0])[0] if item else 0
@@ -1116,7 +1124,9 @@ def render_pending_request_row(r, data, my_name, key_prefix=""):
 
 def render_in_transit_request_row(r, data, my_name, key_prefix=""):
     """이동중 상태인 이관 요청 한 건을 표시하고 입고완료 버튼을 처리한다.
-    로그인 배너의 "입고 확인 필요" 목록과 재분배 도우미 탭 양쪽에서 재사용한다."""
+    로그인 배너의 "입고 확인 필요" 목록과 재분배 도우미 탭 양쪽에서 재사용한다.
+    물류창고는 이 앱의 캠프 재고 데이터에 없어서, 물류창고가 보내거나 받는 쪽이면
+    그쪽의 재고 증감 계산만 건너뛴다 (박스히어로 쪽 실제 재고는 창고에서 수동으로 맞춤)."""
     c0, c1, c2 = st.columns([1, 5, 1])
     c0.badge("이동중", icon=":material/local_shipping:", color="blue")
     c1.write(f"{r['item_name']} · {r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · 승인자: {r['approved_by']}")
@@ -1126,11 +1136,15 @@ def render_in_transit_request_row(r, data, my_name, key_prefix=""):
         else:
             item = find_item_by_code(data, r["item_code"])
             try:
-                moved_amt = deduct_camp_stock(item, r["from_camp"], int(r["qty"]))
+                if r["from_camp"] == "물류창고":
+                    moved_amt = 0
+                else:
+                    moved_amt = deduct_camp_stock(item, r["from_camp"], int(r["qty"]))
             except ValueError as e:
                 st.error(str(e), icon=":material/error:")
             else:
-                add_camp_stock(item, r["to_camp"], int(r["qty"]), moved_amt)
+                if r["to_camp"] != "물류창고":
+                    add_camp_stock(item, r["to_camp"], int(r["qty"]), moved_amt)
                 save_data("inventory", data)
                 complete_transfer_request(r["id"], my_name.strip(), moved_amt)
                 st.success("입고 완료 처리했습니다.", icon=":material/inventory_2:")
@@ -2110,14 +2124,18 @@ if active_key == "rebalance":
 
         item_code = selected["c"]
         with st.form(f"transfer_request_form_{item_code}"):
+            # 물류창고도 보내는/받는 쪽으로 고를 수 있게 캠프 목록 끝에 추가한다 (물류창고 재고는
+            # 이 앱의 캠프 재고 데이터에 없어서 "캠프별 재고 현황" 표에는 넣지 않고, 요청 생성용
+            # 선택지로만 쓴다 — 가용재고 검증은 승인/입고완료 처리 쪽에서 물류창고만 건너뛴다).
             camps_order = data["campsOrder"]
+            camps_order_with_wh = camps_order + ["물류창고"]
             default_from = camps_order.index(suggested_transfer["from"]) if suggested_transfer else 0
             default_to = camps_order.index(suggested_transfer["to"]) if suggested_transfer else min(1, len(camps_order) - 1)
             fc1, fc2, fc3 = st.columns([2, 2, 1])
             with fc1:
-                from_camp_sel = st.selectbox("보내는 캠프", camps_order, index=default_from)
+                from_camp_sel = st.selectbox("보내는 캠프", camps_order_with_wh, index=default_from)
             with fc2:
-                to_camp_sel = st.selectbox("받는 캠프", camps_order, index=default_to)
+                to_camp_sel = st.selectbox("받는 캠프", camps_order_with_wh, index=default_to)
             with fc3:
                 qty_sel = st.number_input(
                     "수량", min_value=1, step=1, value=suggested_transfer["qty"] if suggested_transfer else 1
