@@ -565,6 +565,14 @@ def list_transfer_requests(item_code):
     )
 
 
+@st.cache_data(ttl=15)
+def list_all_transfer_requests():
+    """전체 캠프 간 이관 요청 이력을 품목 구분 없이 최신순으로 반환. 관리자가 품목 검색 없이
+    전체 진행 현황을 보는 용도 (list_warehouse_orders와 동일한 패턴)."""
+    conn = get_db_connection()
+    return conn.query("select * from transfer_requests order by requested_at desc", ttl=0)
+
+
 def list_pending_transfer_requests_for_camp(camp):
     """해당 캠프가 보내는 쪽으로 승인 대기 중인(=아직 처리 안 한) 이관 요청 목록."""
     conn = get_db_connection()
@@ -1094,6 +1102,7 @@ def render_pending_request_row(r, data, my_name, key_prefix=""):
                 approve_transfer_request(r["id"], my_name.strip())
                 st.success("승인했습니다. 이동중 상태로 전환됩니다.", icon=":material/task_alt:")
                 list_transfer_requests.clear()
+                list_all_transfer_requests.clear()
                 st.rerun()
     if c3.button("거절", key=f"{key_prefix}reject_{r['id']}"):
         if not my_name.strip():
@@ -1101,6 +1110,7 @@ def render_pending_request_row(r, data, my_name, key_prefix=""):
         else:
             reject_transfer_request(r["id"], my_name.strip())
             list_transfer_requests.clear()
+            list_all_transfer_requests.clear()
             st.rerun()
 
 
@@ -1125,6 +1135,7 @@ def render_in_transit_request_row(r, data, my_name, key_prefix=""):
                 complete_transfer_request(r["id"], my_name.strip(), moved_amt)
                 st.success("입고 완료 처리했습니다.", icon=":material/inventory_2:")
                 list_transfer_requests.clear()
+                list_all_transfer_requests.clear()
                 st.rerun()
 
 
@@ -1982,6 +1993,32 @@ if active_key == "items":
                     st.dataframe(wide_df, hide_index=False)
 
 if active_key == "rebalance":
+    if auth["role"] == "admin":
+        with st.expander("🔄 전체 재고이관(캠프<>캠프) 현황", icon=":material/list_alt:", expanded=True):
+            all_tr_df = list_all_transfer_requests()
+            all_requested = all_tr_df[all_tr_df["status"] == "requested"] if not all_tr_df.empty else all_tr_df
+            all_in_transit = all_tr_df[all_tr_df["status"] == "in_transit"] if not all_tr_df.empty else all_tr_df
+
+            if all_requested.empty and all_in_transit.empty:
+                st.caption("현재 진행 중인 이관 요청이 없어요.")
+            else:
+                admin_tr_name = st.text_input(
+                    "내 이름 (승인/거절/입고완료 시 기록)",
+                    value=st.session_state.get("transfer_my_name", ""),
+                    key="rebalance_all_name_input",
+                )
+                st.session_state["transfer_my_name"] = admin_tr_name
+
+                if not all_requested.empty:
+                    st.markdown("**요청중**")
+                    for _, r in all_requested.iterrows():
+                        render_pending_request_row(r, data, admin_tr_name, key_prefix="all_")
+
+                if not all_in_transit.empty:
+                    st.markdown("**이동중**")
+                    for _, r in all_in_transit.iterrows():
+                        render_in_transit_request_row(r, data, admin_tr_name, key_prefix="all_")
+
     st.caption("품목을 선택하면 캠프별 재고 편차를 확인할 수 있어요")
     query = st.text_input("재분배를 검토할 품목명 또는 번호 입력", "", key="rebalance_query")
     selected = None
@@ -2096,6 +2133,7 @@ if active_key == "rebalance":
                     )
                     st.success("이관 요청을 등록했습니다.", icon=":material/send:")
                     list_transfer_requests.clear()
+                    list_all_transfer_requests.clear()
                     st.rerun()
 
         req_df = list_transfer_requests(item_code)
