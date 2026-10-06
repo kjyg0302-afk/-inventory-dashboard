@@ -508,6 +508,39 @@ def save_data(key, obj):
         session.commit()
 
 
+def backup_data_before_overwrite(key, reason):
+    """엑셀 업로드/태블로 동기화처럼 app_data(key)를 통째로 덮어쓰기 직전에, 지금 저장된
+    데이터를 data_backups에 스냅샷으로 남긴다. 잘못된 파일을 올려도 직전 상태로 되돌릴 수
+    있게 하기 위함. key별로 최근 30개만 남기고 오래된 백업은 지운다."""
+    existing = load_data(key)
+    if existing is None:
+        return
+    conn = get_db_connection()
+    with conn.session as session:
+        session.execute(
+            text(
+                """
+                insert into data_backups (key, data, reason)
+                values (:key, CAST(:data AS jsonb), :reason)
+                """
+            ),
+            {"key": key, "data": json.dumps(existing, ensure_ascii=False), "reason": reason},
+        )
+        session.execute(
+            text(
+                """
+                delete from data_backups
+                where key = :key
+                  and id not in (
+                      select id from data_backups where key = :key order by backed_up_at desc, id desc limit 30
+                  )
+                """
+            ),
+            {"key": key},
+        )
+        session.commit()
+
+
 @st.cache_data(ttl=30)
 def load_camp_tab_permissions():
     """일반 캠프 로그인이 볼 수 있는 탭 키 목록 (물류창고는 별도, load_warehouse_tab_permissions).
@@ -1537,6 +1570,7 @@ with col_upload1:
         try:
             parsed = parse_inventory_excel(inv_file)
             parsed = apply_boxhero_names_to_inventory(parsed)
+            backup_data_before_overwrite("inventory", "재고 엑셀 업로드")
             save_data("inventory", parsed)
             st.session_state.inventory = parsed
             data = parsed
@@ -1551,6 +1585,7 @@ with col_upload1:
                 with st.spinner("태블로에서 재고 데이터를 받아오는 중이에요..."):
                     parsed = fetch_tableau_inventory()
                 parsed = apply_boxhero_names_to_inventory(parsed)
+                backup_data_before_overwrite("inventory", "태블로 동기화")
                 save_data("inventory", parsed)
                 st.session_state.inventory = parsed
                 data = parsed
@@ -1575,6 +1610,7 @@ with col_upload2:
                     facts_df = parsed_usage.pop("facts")
                     parsed_usage, facts_df = apply_boxhero_names_to_usage(parsed_usage, facts_df)
                     save_usage_facts(facts_df)
+                backup_data_before_overwrite("usage", "사용량 데이터 업로드")
                 save_data("usage", parsed_usage)
             st.session_state.usage = parsed_usage
             usage = parsed_usage

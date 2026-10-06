@@ -7,6 +7,18 @@ create table if not exists app_data (
     updated_at timestamptz not null default now()
 );
 
+-- 재고/사용량 엑셀 업로드·태블로 동기화처럼 app_data를 통째로 덮어쓰기 직전의 스냅샷.
+-- 잘못된 파일을 올려도 직전 상태로 되돌릴 수 있도록 key별 최근 30개만 유지한다.
+create table if not exists data_backups (
+    id bigserial primary key,
+    key text not null,
+    data jsonb not null,
+    reason text,
+    backed_up_at timestamptz not null default now()
+);
+
+create index if not exists idx_data_backups_key on data_backups (key, backed_up_at desc);
+
 -- 캠프별 로그인 비밀번호(PIN). 개인별 계정이 아니라 캠프 하나당 비밀번호 하나를 공유하는
 -- 가벼운 방식이라, 비밀번호는 그대로 저장하지 않고 salt+해시("salt$sha256digest")로 저장한다.
 create table if not exists camp_credentials (
