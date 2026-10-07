@@ -87,7 +87,10 @@ def apply_boxhero_names_to_usage(parsed_usage, facts_df=None):
     name_map = get_boxhero_name_map()
     if name_map:
         sku_names = parsed_usage.get("skuNames") or {}
-        for code in list(sku_names.keys()):
+        # 기존에 이름이 있던 SKU뿐 아니라, 사용량만 있고 이름이 전혀 없던 SKU(원본 정비내역
+        # 엑셀 경로처럼 품명 컬럼을 안 가져온 경우)도 박스히어로 기준으로 채운다.
+        all_codes = set(sku_names.keys()) | set((parsed_usage.get("items") or {}).keys())
+        for code in all_codes:
             code_u = str(code).strip().upper()
             if code_u in name_map:
                 sku_names[code] = name_map[code_u]

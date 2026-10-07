@@ -170,8 +170,8 @@ def _aggregate_usage_df(df: pd.DataFrame) -> dict:
 def parse_usage_excel_raw(file) -> dict:
     """정비 내역 원본 엑셀(건별 로우 — 정비 1건의 부품 1종이 한 행)을 읽어
     usage.json과 같은 구조로 변환. parse_usage_excel이 받는, 태블로에서 이미
-    피벗/집계된 엑셀과 달리, 여기서는 상태가 '출고완료' 또는 '정비완료'인 행만
-    실제 '사용'으로 보고 집계한다."""
+    피벗/집계된 엑셀과 달리, 여기서는 상태가 '출고완료'/'정비완료'/'외주'인 행만
+    실제 '사용'으로 보고 집계한다 (외주도 부품 자체는 소진되므로 포함)."""
     cols = ["상태", "고객명", "부품번호", "수량", "부품계", "년도", "월", "해당주"]
     try:
         df = pd.read_excel(file, usecols=cols, engine="calamine")
@@ -186,12 +186,12 @@ def parse_usage_excel_raw(file) -> dict:
 
     # 부품번호가 없는 행(공임 등 재고와 무관한 항목)은 제외
     df = df[df["부품번호"].notna() & (df["부품번호"].astype(str).str.strip() != "")].copy()
-    # 출고완료/정비완료만 실제 '사용'으로 집계 (정비중/접수/취소/외주는 아직 소진된 재고가 아님).
+    # 출고완료/정비완료/외주만 실제 '사용'으로 집계 (정비중/접수/취소는 아직 소진된 재고가 아님).
     # 부품번호가 있는 행은 상태와 무관하게 거의 전부 정비완료 날짜가 찍혀 있어서
     # 날짜 유무만으로는 구분이 안 되고, 상태값 자체로 걸러야 한다.
-    df = df[df["상태"].isin(["출고완료", "정비완료"])]
+    df = df[df["상태"].isin(["출고완료", "정비완료", "외주"])]
     if df.empty:
-        raise ValueError("출고완료/정비완료 상태의 사용량 데이터를 찾을 수 없습니다.")
+        raise ValueError("출고완료/정비완료/외주 상태의 사용량 데이터를 찾을 수 없습니다.")
 
     df["년도"] = pd.to_numeric(df["년도"], errors="coerce")
     df["월"] = pd.to_numeric(df["월"], errors="coerce")
