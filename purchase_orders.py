@@ -4,6 +4,13 @@ import streamlit as st
 from sqlalchemy import text
 
 from db import get_db_connection
+from chat_notify import send_camp_chat_notification
+
+
+def _get_warehouse_order(order_id):
+    conn = get_db_connection()
+    df = conn.query("select * from warehouse_orders where id = :id", params={"id": order_id}, ttl=0)
+    return df.iloc[0] if not df.empty else None
 
 
 @st.cache_data(ttl=15)
@@ -56,6 +63,11 @@ def create_warehouse_order(item_code, item_name, to_camp, qty, weekly_avg_usage,
             },
         )
         session.commit()
+    send_camp_chat_notification(
+        "물류창고",
+        f"📦 발주 요청이 들어왔어요\n{item_name} · {int(qty)}개 · → {to_camp}\n"
+        f"요청자: {requested_by}\n승인/거절이 필요해요.",
+    )
 
 
 def approve_warehouse_order(order_id, approved_by):
@@ -73,6 +85,13 @@ def approve_warehouse_order(order_id, approved_by):
             {"id": order_id, "approved_by": approved_by},
         )
         session.commit()
+    r = _get_warehouse_order(order_id)
+    if r is not None:
+        send_camp_chat_notification(
+            r["to_camp"],
+            f"✅ 발주가 승인됐어요 (창고 발송 준비)\n{r['item_name']} · {int(r['qty'])}개\n"
+            f"승인자: {approved_by}\n물건 받으면 입고완료 눌러주세요.",
+        )
 
 
 def reject_warehouse_order(order_id, rejected_by):
@@ -89,6 +108,12 @@ def reject_warehouse_order(order_id, rejected_by):
             {"id": order_id, "rejected_by": rejected_by},
         )
         session.commit()
+    r = _get_warehouse_order(order_id)
+    if r is not None:
+        send_camp_chat_notification(
+            r["to_camp"],
+            f"❌ 발주 요청이 거절됐어요\n{r['item_name']} · {int(r['qty'])}개\n거절자: {rejected_by}",
+        )
 
 
 def complete_warehouse_order(order_id, received_by, amt):
@@ -106,3 +131,10 @@ def complete_warehouse_order(order_id, received_by, amt):
             {"id": order_id, "received_by": received_by, "amt": amt},
         )
         session.commit()
+    r = _get_warehouse_order(order_id)
+    if r is not None:
+        send_camp_chat_notification(
+            "물류창고",
+            f"📬 발주가 입고완료 처리됐어요\n{r['item_name']} · {int(r['qty'])}개 · → {r['to_camp']}\n"
+            f"입고 확인자: {received_by}",
+        )

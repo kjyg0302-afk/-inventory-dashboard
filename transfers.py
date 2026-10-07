@@ -4,6 +4,13 @@ import streamlit as st
 from sqlalchemy import text
 
 from db import get_db_connection
+from chat_notify import send_camp_chat_notification
+
+
+def _get_transfer_request(request_id):
+    conn = get_db_connection()
+    df = conn.query("select * from transfer_requests where id = :id", params={"id": request_id}, ttl=0)
+    return df.iloc[0] if not df.empty else None
 
 
 @st.cache_data(ttl=15)
@@ -35,7 +42,18 @@ def list_pending_transfer_requests_for_camp(camp):
         "select * from transfer_requests where from_camp = :camp and status = 'requested' "
         "order by requested_at desc",
         params={"camp": camp},
-        ttl=10,
+        ttl=0,
+    )
+
+
+def list_outgoing_transit_requests_for_camp(camp):
+    """해당 캠프가 보내는 쪽으로, 승인되어 발송해야 하는(이동중) 이관 요청 목록."""
+    conn = get_db_connection()
+    return conn.query(
+        "select * from transfer_requests where from_camp = :camp and status = 'in_transit' "
+        "order by approved_at desc",
+        params={"camp": camp},
+        ttl=0,
     )
 
 
@@ -46,7 +64,7 @@ def list_incoming_transit_requests_for_camp(camp):
         "select * from transfer_requests where to_camp = :camp and status = 'in_transit' "
         "order by approved_at desc",
         params={"camp": camp},
-        ttl=10,
+        ttl=0,
     )
 
 
@@ -57,7 +75,7 @@ def list_my_requested_awaiting_approval(camp):
         "select * from transfer_requests where to_camp = :camp and status = 'requested' "
         "order by requested_at desc",
         params={"camp": camp},
-        ttl=10,
+        ttl=0,
     )
 
 
@@ -81,6 +99,11 @@ def create_transfer_request(item_code, item_name, from_camp, to_camp, qty, reque
             },
         )
         session.commit()
+    send_camp_chat_notification(
+        from_camp,
+        f"📦 재고이관 요청이 들어왔어요\n{item_name} · {int(qty)}개 · {from_camp} → {to_camp}\n"
+        f"요청자: {requested_by}\n승인/거절이 필요해요.",
+    )
 
 
 def approve_transfer_request(request_id, approved_by):
@@ -98,6 +121,13 @@ def approve_transfer_request(request_id, approved_by):
             {"id": request_id, "approved_by": approved_by},
         )
         session.commit()
+    r = _get_transfer_request(request_id)
+    if r is not None:
+        send_camp_chat_notification(
+            r["to_camp"],
+            f"✅ 이관 요청이 승인되어 이동중이에요\n{r['item_name']} · {int(r['qty'])}개 · "
+            f"{r['from_camp']} → {r['to_camp']}\n승인자: {approved_by}\n물건 받으면 입고완료 눌러주세요.",
+        )
 
 
 def reject_transfer_request(request_id, rejected_by):
@@ -114,6 +144,13 @@ def reject_transfer_request(request_id, rejected_by):
             {"id": request_id, "rejected_by": rejected_by},
         )
         session.commit()
+    r = _get_transfer_request(request_id)
+    if r is not None:
+        send_camp_chat_notification(
+            r["to_camp"],
+            f"❌ 이관 요청이 거절됐어요\n{r['item_name']} · {int(r['qty'])}개 · "
+            f"{r['from_camp']} → {r['to_camp']}\n거절자: {rejected_by}",
+        )
 
 
 def complete_transfer_request(request_id, received_by, amt):
@@ -131,3 +168,10 @@ def complete_transfer_request(request_id, received_by, amt):
             {"id": request_id, "received_by": received_by, "amt": amt},
         )
         session.commit()
+    r = _get_transfer_request(request_id)
+    if r is not None:
+        send_camp_chat_notification(
+            r["from_camp"],
+            f"📬 이관이 입고완료 처리됐어요\n{r['item_name']} · {int(r['qty'])}개 · "
+            f"{r['from_camp']} → {r['to_camp']}\n입고 확인자: {received_by}",
+        )

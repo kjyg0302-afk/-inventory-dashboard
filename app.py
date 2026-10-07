@@ -41,6 +41,7 @@ from purchase_orders import list_pending_warehouse_orders, list_incoming_warehou
 from snapshots import current_inventory_period, save_inventory_value_snapshot, build_camp_value_snapshot_rows
 from transfers import (
     list_pending_transfer_requests_for_camp,
+    list_outgoing_transit_requests_for_camp,
     list_incoming_transit_requests_for_camp,
     list_my_requested_awaiting_approval,
 )
@@ -55,6 +56,7 @@ from app_data import (
     save_warehouse_tab_permissions,
 )
 from boxhero import apply_boxhero_names_to_inventory, apply_boxhero_names_to_usage
+from chat_notify import load_camp_chat_webhooks, save_camp_chat_webhook, delete_camp_chat_webhook
 
 st.set_page_config(page_title="지바이크 SCM 대시보드", layout="wide")
 
@@ -308,17 +310,19 @@ if my_camp == "물류창고":
 elif my_camp:
     try:
         pending_out_df = list_pending_transfer_requests_for_camp(my_camp)
+        outgoing_transit_df = list_outgoing_transit_requests_for_camp(my_camp)
         incoming_transit_df = list_incoming_transit_requests_for_camp(my_camp)
         incoming_wh_df = list_incoming_warehouse_orders_for_camp(my_camp)
         my_awaiting_df = list_my_requested_awaiting_approval(my_camp)
     except Exception:
         pending_out_df = pd.DataFrame()
+        outgoing_transit_df = pd.DataFrame()
         incoming_transit_df = pd.DataFrame()
         incoming_wh_df = pd.DataFrame()
         my_awaiting_df = pd.DataFrame()
 
     actionable_n = len(pending_out_df) + len(incoming_transit_df) + len(incoming_wh_df)
-    if actionable_n > 0 or not my_awaiting_df.empty:
+    if actionable_n > 0 or not my_awaiting_df.empty or not outgoing_transit_df.empty:
         if actionable_n > 0:
             st.warning(
                 f"**{my_camp}** 앞으로 처리할 요청이 **{actionable_n}건** 있어요. "
@@ -334,6 +338,14 @@ elif my_camp:
             st.markdown("**승인 대기중 (내가 보내는 쪽, 캠프 간 이관)**")
             for _, r in pending_out_df.iterrows():
                 render_pending_request_row(r, data, my_name_banner, key_prefix="banner_")
+
+        if not outgoing_transit_df.empty:
+            st.markdown("**📤 발송해야 할 물건 (승인됨 · 받는 캠프가 입고완료 누르면 사라져요)**")
+            for _, r in outgoing_transit_df.iterrows():
+                st.caption(
+                    f":material/local_shipping: {r['item_name']} · {int(r['qty'])}개 → **{r['to_camp']}** "
+                    f"(승인자: {r['approved_by']})"
+                )
 
         if not incoming_transit_df.empty:
             st.markdown("**입고 확인 필요 (캠프 간 이관)**")
@@ -363,6 +375,34 @@ if auth["role"] == "admin":
                 st.success(f"{pw_camp} 비밀번호를 설정했습니다.", icon=":material/check_circle:")
             else:
                 st.error("비밀번호를 입력해주세요.", icon=":material/error:")
+
+    with st.expander("💬 캠프별 구글챗 알림 웹훅 관리 (관리자 전용)"):
+        st.caption(
+            "캠프/물류창고마다 담당자 전용 구글챗 공간(스페이스)을 만들고 웹훅 URL을 등록하면, "
+            "재고이관 요청/승인/거절/입고완료 시점마다 그 담당자에게 알림이 가요. "
+            "비워두면 그 캠프는 알림을 받지 않아요."
+        )
+        current_webhooks = load_camp_chat_webhooks()
+        wh_camp = st.selectbox("캠프/창고 선택", _login_accounts, key="admin_webhook_camp")
+        wh_url = st.text_input(
+            "웹훅 URL", value=current_webhooks.get(wh_camp, ""), key=f"admin_webhook_url_{wh_camp}"
+        )
+        wcol1, wcol2 = st.columns(2)
+        if wcol1.button("저장", key="admin_webhook_save_btn"):
+            if wh_url.strip():
+                save_camp_chat_webhook(wh_camp, wh_url.strip())
+                st.success(f"{wh_camp} 웹훅을 저장했습니다.", icon=":material/check_circle:")
+                load_camp_chat_webhooks.clear()
+                st.rerun()
+            else:
+                st.error("웹훅 URL을 입력해주세요.", icon=":material/error:")
+        if wcol2.button("삭제", key="admin_webhook_delete_btn"):
+            delete_camp_chat_webhook(wh_camp)
+            st.success(f"{wh_camp} 웹훅을 삭제했습니다.", icon=":material/check_circle:")
+            load_camp_chat_webhooks.clear()
+            st.rerun()
+        if current_webhooks:
+            st.caption(f"현재 등록된 캠프: {', '.join(sorted(current_webhooks.keys()))}")
 
     with st.expander("🔐 캠프 화면(탭) 권한 관리 (관리자 전용)"):
         st.caption("물류창고를 제외한 일반 캠프로 로그인했을 때 보이는 탭을 선택하세요. 관리자는 항상 전체를 봐요.")

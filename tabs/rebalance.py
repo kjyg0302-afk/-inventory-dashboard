@@ -194,7 +194,7 @@ def render(ctx):
                         f"{int(r['qty'])}개 · 승인자: {r['approved_by']} (입고 대기중)"
                     )
 
-        if not done_rows.empty:
+        if not done_rows.empty and auth["role"] == "admin":
             with st.expander(f"완료/거절 내역 ({len(done_rows)}건)", icon=":material/history:"):
                 for _, r in done_rows.iterrows():
                     is_done = r["status"] == "completed"

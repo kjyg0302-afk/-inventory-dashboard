@@ -19,6 +19,14 @@ create table if not exists data_backups (
 
 create index if not exists idx_data_backups_key on data_backups (key, backed_up_at desc);
 
+-- 캠프별(물류창고 포함) 구글챗 웹훅 URL. 재고이관 요청/승인/거절/입고완료 시점마다
+-- 그 시점에 처리해야 할 캠프 담당자에게 알림을 보내는 데 쓴다.
+create table if not exists camp_chat_webhooks (
+    camp text primary key,
+    webhook_url text not null,
+    updated_at timestamptz not null default now()
+);
+
 -- 캠프별 로그인 비밀번호(PIN). 개인별 계정이 아니라 캠프 하나당 비밀번호 하나를 공유하는
 -- 가벼운 방식이라, 비밀번호는 그대로 저장하지 않고 salt+해시("salt$sha256digest")로 저장한다.
 create table if not exists camp_credentials (
