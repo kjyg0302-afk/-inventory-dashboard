@@ -10,12 +10,34 @@ from usage_calc import get_usage_for_code
 
 
 def save_usage_facts(facts_df):
-    """usage_facts 테이블을 사용량 엑셀 기준으로 통째로 새로 채운다 (전체 교체)."""
+    """usage_facts 테이블에서 facts_df에 들어있는 (year, week) 조합만 지우고 다시 채운다
+    (주차 단위 교체). 1주치만 올리든, 과거 데이터까지 포함해 통째로 다시 올리든 포함된
+    주만 최신화되고 나머지 주는 그대로 남는다."""
     conn = get_db_connection()
     engine = conn.session.get_bind()
+    weeks = facts_df[["year", "week"]].drop_duplicates()
     with engine.begin() as connection:
-        connection.execute(text("truncate table usage_facts"))
+        for _, row in weeks.iterrows():
+            connection.execute(
+                text("delete from usage_facts where year = :year and week = :week"),
+                {"year": int(row["year"]), "week": int(row["week"])},
+            )
         facts_df.to_sql("usage_facts", con=connection, if_exists="append", index=False, method="multi", chunksize=1000)
+
+
+def save_usage_transactions(tx_df):
+    """usage_transactions 테이블에서 tx_df에 들어있는 (year, week) 조합만 지우고 다시 채운다
+    (save_usage_facts와 동일한 주차 단위 교체 방식)."""
+    conn = get_db_connection()
+    engine = conn.session.get_bind()
+    weeks = tx_df[["year", "week"]].drop_duplicates()
+    with engine.begin() as connection:
+        for _, row in weeks.iterrows():
+            connection.execute(
+                text("delete from usage_transactions where year = :year and week = :week"),
+                {"year": int(row["year"]), "week": int(row["week"])},
+            )
+        tx_df.to_sql("usage_transactions", con=connection, if_exists="append", index=False, method="multi", chunksize=1000)
 
 
 def camp_weekly_usage_rate(usage, code, camp):

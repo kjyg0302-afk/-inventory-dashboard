@@ -167,12 +167,14 @@ def _aggregate_usage_df(df: pd.DataFrame) -> dict:
     }
 
 
-def parse_usage_excel_raw(file) -> dict:
-    """정비 내역 원본 엑셀(건별 로우 — 정비 1건의 부품 1종이 한 행)을 읽어
-    usage.json과 같은 구조로 변환. parse_usage_excel이 받는, 태블로에서 이미
-    피벗/집계된 엑셀과 달리, 여기서는 상태가 '출고완료'/'정비완료'/'외주'인 행만
-    실제 '사용'으로 보고 집계한다 (외주도 부품 자체는 소진되므로 포함)."""
-    cols = ["상태", "고객명", "부품번호", "수량", "부품계", "년도", "월", "해당주"]
+_RAW_USAGE_BASE_COLS = ["상태", "고객명", "부품번호", "수량", "부품계", "년도", "월", "해당주"]
+
+
+def _load_clean_usage_rows(file, extra_cols=()) -> pd.DataFrame:
+    """정비 내역 원본 엑셀(건별 로우 — 정비 1건의 부품 1종이 한 행)을 읽어, 사용량 집계에
+    필요한 정리(부품번호/상태 필터, 년도/월/해당주 정제, 고객명 정리)까지 끝낸 df를 반환.
+    parse_usage_excel_raw(집계용)와 parse_usage_transactions_raw(로우데이터 보관용)가 공유."""
+    cols = list(dict.fromkeys(_RAW_USAGE_BASE_COLS + list(extra_cols)))
     try:
         df = pd.read_excel(file, usecols=cols, engine="calamine")
     except Exception:
@@ -212,11 +214,62 @@ def parse_usage_excel_raw(file) -> dict:
 
     # 부품번호 대소문자가 섞여 있어 같은 부품이 다른 SKU로 쪼개지는 것을 방지
     df["부품번호"] = df["부품번호"].astype(str).str.strip().str.upper()
-    df = df.rename(columns={"수량": "합계 : 수량", "부품계": "합계 : 부품계"})
-    df["합계 : 수량"] = pd.to_numeric(df["합계 : 수량"], errors="coerce").fillna(0)
-    df["합계 : 부품계"] = pd.to_numeric(df["합계 : 부품계"], errors="coerce").fillna(0)
+    df["수량"] = pd.to_numeric(df["수량"], errors="coerce").fillna(0)
+    df["부품계"] = pd.to_numeric(df["부품계"], errors="coerce").fillna(0)
+    return df
 
+
+def parse_usage_excel_raw(file) -> dict:
+    """정비 내역 원본 엑셀을 읽어 usage.json과 같은 구조(부품x캠프x연도x월x주 합계)로 집계."""
+    df = _load_clean_usage_rows(file)
+    df = df.rename(columns={"수량": "합계 : 수량", "부품계": "합계 : 부품계"})
     return _aggregate_usage_df(df)
+
+
+def parse_usage_transactions_raw(file) -> pd.DataFrame:
+    """정비 내역 원본 엑셀을 집계 없이, 건별 로우(기기번호 포함) 그대로 usage_transactions
+    테이블 구조로 변환. 기기(차량번호)별 사용금액처럼 usage_facts의 집계 단위보다
+    더 세밀한 분석이 필요할 때 쓴다."""
+    extra_cols = ["정비번호", "차량번호", "바코드", "단가", "정비완료", "작업기사"]
+    df = _load_clean_usage_rows(file, extra_cols=extra_cols)
+
+    df["정비완료"] = pd.to_datetime(df["정비완료"], errors="coerce").dt.date
+    df["단가"] = pd.to_numeric(df["단가"], errors="coerce")
+
+    out = df.rename(
+        columns={
+            "년도": "year",
+            "월": "month",
+            "해당주": "week",
+            "고객명": "camp",
+            "부품번호": "item_code",
+            "차량번호": "device_no",
+            "정비번호": "ticket_id",
+            "바코드": "barcode",
+            "수량": "qty",
+            "단가": "unit_price",
+            "부품계": "amt",
+            "상태": "status",
+            "정비완료": "service_date",
+            "작업기사": "worker",
+        }
+    )
+    def _clean_id(v):
+        if pd.isna(v):
+            return None
+        if isinstance(v, float) and v.is_integer():
+            return str(int(v))
+        return str(v).strip()
+
+    out["device_no"] = out["device_no"].apply(_clean_id)
+    out["ticket_id"] = out["ticket_id"].apply(_clean_id)
+    out["worker"] = out["worker"].apply(lambda v: str(v).strip() if pd.notna(v) else None)
+
+    cols_order = [
+        "year", "month", "week", "camp", "item_code", "device_no", "ticket_id",
+        "barcode", "qty", "unit_price", "amt", "status", "service_date", "worker",
+    ]
+    return out[cols_order]
 
 
 def parse_inventory_excel(file) -> dict:

@@ -12,7 +12,12 @@ import json
 import pandas as pd
 import streamlit as st
 
-from parsing import parse_inventory_excel, parse_usage_excel, parse_usage_excel_raw
+from parsing import (
+    parse_inventory_excel,
+    parse_usage_excel,
+    parse_usage_excel_raw,
+    parse_usage_transactions_raw,
+)
 from tableau import get_tableau_config, fetch_tableau_inventory
 from auth import (
     verify_password,
@@ -45,7 +50,7 @@ from transfers import (
     list_incoming_transit_requests_for_camp,
     list_my_requested_awaiting_approval,
 )
-from usage_data import save_usage_facts
+from usage_data import save_usage_facts, save_usage_transactions
 from app_data import (
     load_data,
     save_data,
@@ -244,13 +249,18 @@ with col_upload2:
                 else:
                     preview_cols = set(pd.read_excel(usage_file, nrows=0).columns)
                     usage_file.seek(0)
-                    if {"상태", "수량", "부품계"} <= preview_cols:
+                    is_raw_format = {"상태", "수량", "부품계"} <= preview_cols
+                    if is_raw_format:
                         parsed_usage = parse_usage_excel_raw(usage_file)
                     else:
                         parsed_usage = parse_usage_excel(usage_file)
                     facts_df = parsed_usage.pop("facts")
                     parsed_usage, facts_df = apply_boxhero_names_to_usage(parsed_usage, facts_df)
                     save_usage_facts(facts_df)
+                    if is_raw_format:
+                        usage_file.seek(0)
+                        tx_df = parse_usage_transactions_raw(usage_file)
+                        save_usage_transactions(tx_df)
                 backup_data_before_overwrite("usage", "사용량 데이터 업로드")
                 save_data("usage", parsed_usage)
             st.session_state.usage = parsed_usage

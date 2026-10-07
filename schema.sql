@@ -90,7 +90,10 @@ create table if not exists warehouse_orders (
 create index if not exists idx_warehouse_orders_item on warehouse_orders (item_code);
 create index if not exists idx_warehouse_orders_status on warehouse_orders (status);
 
--- 사용량 로우 데이터(관계형). 사용량 엑셀을 업로드할 때마다 전체를 새로 채운다.
+-- 사용량 로우 데이터(관계형, 부품x캠프x연도x월x주 단위 합계).
+-- (year, week) 단위로 누적된다: 업로드된 파일에 들어있는 주만 지우고 다시 채우므로,
+-- 1주치만 올리든 과거 데이터까지 포함해 통째로 다시 올리든 포함된 주만 최신화되고
+-- 나머지 주는 그대로 남는다.
 -- usage 요약 JSON(app_data)이 미리 정해둔 모양(월별/주별 등)으로만 볼 수 있는 것과 달리,
 -- 이 테이블은 SQL로 어떤 기준으로든 자유롭게 집계할 수 있고, 예측(forecast) 등에도 바로 쓸 수 있다.
 create table if not exists usage_facts (
@@ -172,3 +175,32 @@ create table if not exists sku_categories (
 
 create index if not exists idx_sku_categories_category on sku_categories (category);
 create index if not exists idx_sku_categories_item on sku_categories (item_code);
+
+-- 사용량 로우 데이터(원본 정비내역 엑셀의 건별 행, 집계하지 않고 그대로 보관).
+-- usage_facts가 부품x캠프x연도x월x주 단위 "합계"만 가진 것과 달리, 여기는 기기(차량)별/
+-- 티켓별로 쪼개진 원본 그대로를 남겨서, 기기당 사용금액처럼 더 세밀한 집계가 필요할 때
+-- 다시 원본에서 계산할 수 있게 한다.
+-- usage_facts와 동일하게 (year, week) 단위로 누적된다.
+create table if not exists usage_transactions (
+    id bigserial primary key,
+    year integer not null,
+    month integer not null,
+    week integer not null,
+    camp text not null,
+    item_code text not null,
+    device_no text,
+    ticket_id text,
+    barcode text,
+    qty numeric not null default 0,
+    unit_price numeric,
+    amt numeric not null default 0,
+    status text,
+    service_date date,
+    worker text,
+    created_at timestamptz not null default now()
+);
+
+create index if not exists idx_usage_transactions_item on usage_transactions (item_code);
+create index if not exists idx_usage_transactions_camp on usage_transactions (camp);
+create index if not exists idx_usage_transactions_device on usage_transactions (device_no);
+create index if not exists idx_usage_transactions_year_week on usage_transactions (year, week);
