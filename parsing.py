@@ -48,6 +48,7 @@ def parse_usage_excel(file) -> dict:
 
     df["고객명"] = df["고객명"].astype(str).str.strip().map(lambda c: USAGE_CAMP_NAME_MAP.get(c, c))
     df = df[~df["고객명"].isin(USAGE_EXCLUDE_CAMPS)]
+    df = df[df["고객명"] != ""]
     # 캠프명이 깨져서 숫자만 들어간 오염된 행 제외
     df = df[~df["고객명"].str.fullmatch(r"\d+")]
 
@@ -55,6 +56,12 @@ def parse_usage_excel(file) -> dict:
     df["합계 : 수량"] = pd.to_numeric(df["합계 : 수량"], errors="coerce").fillna(0)
     df["합계 : 부품계"] = pd.to_numeric(df["합계 : 부품계"], errors="coerce").fillna(0)
 
+    return _aggregate_usage_df(df)
+
+
+def _aggregate_usage_df(df: pd.DataFrame) -> dict:
+    """정리된 사용량 df(고객명/부품번호/년도/월/해당주/합계 : 수량/합계 : 부품계 컬럼,
+    선택적으로 부품명 컬럼 '부품')를 usage.json과 같은 구조로 집계."""
     camp_week_count = (
         df[["고객명", "년도", "해당주"]].drop_duplicates().groupby("고객명").size().to_dict()
     )
@@ -158,6 +165,58 @@ def parse_usage_excel(file) -> dict:
         "skuWeeklyAmount": sku_weekly_amount,
         "facts": facts_df,
     }
+
+
+def parse_usage_excel_raw(file) -> dict:
+    """정비 내역 원본 엑셀(건별 로우 — 정비 1건의 부품 1종이 한 행)을 읽어
+    usage.json과 같은 구조로 변환. parse_usage_excel이 받는, 태블로에서 이미
+    피벗/집계된 엑셀과 달리, 여기서는 상태가 '출고완료' 또는 '정비완료'인 행만
+    실제 '사용'으로 보고 집계한다."""
+    cols = ["상태", "고객명", "부품번호", "수량", "부품계", "년도", "월", "해당주"]
+    try:
+        df = pd.read_excel(file, usecols=cols, engine="calamine")
+    except Exception:
+        df = pd.read_excel(file, usecols=cols, engine="openpyxl")
+
+    missing = set(cols) - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"원본 정비 내역 엑셀 형식이 올바르지 않습니다. 다음 컬럼이 없습니다: {', '.join(missing)}"
+        )
+
+    # 부품번호가 없는 행(공임 등 재고와 무관한 항목)은 제외
+    df = df[df["부품번호"].notna() & (df["부품번호"].astype(str).str.strip() != "")].copy()
+    # 출고완료/정비완료만 실제 '사용'으로 집계 (정비중/접수/취소/외주는 아직 소진된 재고가 아님).
+    # 부품번호가 있는 행은 상태와 무관하게 거의 전부 정비완료 날짜가 찍혀 있어서
+    # 날짜 유무만으로는 구분이 안 되고, 상태값 자체로 걸러야 한다.
+    df = df[df["상태"].isin(["출고완료", "정비완료"])]
+    if df.empty:
+        raise ValueError("출고완료/정비완료 상태의 사용량 데이터를 찾을 수 없습니다.")
+
+    df["년도"] = pd.to_numeric(df["년도"], errors="coerce")
+    df["월"] = pd.to_numeric(df["월"], errors="coerce")
+    df["해당주"] = pd.to_numeric(df["해당주"], errors="coerce")
+    df = df.dropna(subset=["년도", "월", "해당주"])
+    # 날짜가 비어 생기는 1900년 등 오염된 행 제외
+    df = df[(df["년도"] >= 2020) & (df["년도"] <= 2030)]
+    if df.empty:
+        raise ValueError("유효한 년도/월/해당주 값을 가진 사용량 데이터를 찾을 수 없습니다.")
+    df["년도"] = df["년도"].astype(int)
+    df["월"] = df["월"].astype(int)
+    df["해당주"] = df["해당주"].astype(int)
+
+    df["고객명"] = df["고객명"].astype(str).str.strip().map(lambda c: USAGE_CAMP_NAME_MAP.get(c, c))
+    df = df[~df["고객명"].isin(USAGE_EXCLUDE_CAMPS)]
+    df = df[df["고객명"] != ""]
+    df = df[~df["고객명"].str.fullmatch(r"\d+")]
+
+    # 부품번호 대소문자가 섞여 있어 같은 부품이 다른 SKU로 쪼개지는 것을 방지
+    df["부품번호"] = df["부품번호"].astype(str).str.strip().str.upper()
+    df = df.rename(columns={"수량": "합계 : 수량", "부품계": "합계 : 부품계"})
+    df["합계 : 수량"] = pd.to_numeric(df["합계 : 수량"], errors="coerce").fillna(0)
+    df["합계 : 부품계"] = pd.to_numeric(df["합계 : 부품계"], errors="coerce").fillna(0)
+
+    return _aggregate_usage_df(df)
 
 
 def parse_inventory_excel(file) -> dict:

@@ -12,7 +12,7 @@ import json
 import pandas as pd
 import streamlit as st
 
-from parsing import parse_inventory_excel, parse_usage_excel
+from parsing import parse_inventory_excel, parse_usage_excel, parse_usage_excel_raw
 from tableau import get_tableau_config, fetch_tableau_inventory
 from auth import (
     verify_password,
@@ -242,7 +242,12 @@ with col_upload2:
                         raise ValueError("사용량 JSON 형식이 올바르지 않습니다.")
                     parsed_usage, _ = apply_boxhero_names_to_usage(parsed_usage)
                 else:
-                    parsed_usage = parse_usage_excel(usage_file)
+                    preview_cols = set(pd.read_excel(usage_file, nrows=0).columns)
+                    usage_file.seek(0)
+                    if {"상태", "수량", "부품계"} <= preview_cols:
+                        parsed_usage = parse_usage_excel_raw(usage_file)
+                    else:
+                        parsed_usage = parse_usage_excel(usage_file)
                     facts_df = parsed_usage.pop("facts")
                     parsed_usage, facts_df = apply_boxhero_names_to_usage(parsed_usage, facts_df)
                     save_usage_facts(facts_df)
