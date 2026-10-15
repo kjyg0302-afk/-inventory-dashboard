@@ -204,3 +204,52 @@ create index if not exists idx_usage_transactions_item on usage_transactions (it
 create index if not exists idx_usage_transactions_camp on usage_transactions (camp);
 create index if not exists idx_usage_transactions_device on usage_transactions (device_no);
 create index if not exists idx_usage_transactions_year_week on usage_transactions (year, week);
+
+-- 거래처(공급업체) 마스터. 내자(국내)/외자(해외) 구분만 두고, 담당자 연락처는 참고용 메모.
+create table if not exists vendors (
+    id bigserial primary key,
+    name text not null unique,
+    vendor_type text not null,  -- '내자' / '외자'
+    contact text,
+    note text,
+    created_at timestamptz not null default now()
+);
+
+-- 외부 구매발주(PO) 헤더. 거래처 1곳 + 발주 공통 정보만 가지고, 실제 품목/상태는
+-- vendor_order_items에 있다 (실제 발주서처럼 한 PO에 품목 여러 줄을 담을 수 있어서).
+create table if not exists vendor_orders (
+    id bigserial primary key,
+    vendor_id bigint not null references vendors(id),
+    ordered_by text not null,
+    ordered_at timestamptz not null default now(),
+    note text
+);
+
+create index if not exists idx_vendor_orders_vendor on vendor_orders (vendor_id);
+
+-- 구매발주 라인(품목별 1행). 같은 PO 안에서도 품목마다 입고예정일/입고일이 다를 수 있어서
+-- 상태 전이는 라인 단위로 일어난다: ordered(발주) -> expected(입고예정일 입력됨) ->
+-- received(입고완료, 수령수량 포함) / 언제든 cancelled 가능.
+-- 현재고+입고예정 통합 뷰는 status in ('ordered','expected')인 라인을 item_code로 묶어서 쓴다.
+-- 생산/선적 등 세부 단계는 거래처가 실시간 공유를 못 해줘서 1차 범위에서 추적하지 않는다
+-- (내자/외자 모두 이 3단계로 동일하게 간다).
+create table if not exists vendor_order_items (
+    id bigserial primary key,
+    vendor_order_id bigint not null references vendor_orders(id),
+    item_code text not null,
+    item_name text not null,
+    qty numeric not null,
+    unit_price numeric,
+    currency text not null default 'KRW',
+    amt numeric,
+    status text not null default 'ordered',  -- ordered / expected / received / cancelled
+    expected_arrival_date date,
+    received_qty numeric,
+    received_by text,
+    received_at timestamptz,
+    updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_vendor_order_items_order on vendor_order_items (vendor_order_id);
+create index if not exists idx_vendor_order_items_item on vendor_order_items (item_code);
+create index if not exists idx_vendor_order_items_status on vendor_order_items (status);
