@@ -50,6 +50,7 @@ from transfers import (
     list_outgoing_transit_requests_for_camp,
     list_incoming_transit_requests_for_camp,
     list_my_requested_awaiting_approval,
+    list_my_recently_rejected,
 )
 from usage_data import save_usage_facts, save_usage_transactions
 from app_data import (
@@ -331,15 +332,22 @@ elif my_camp:
         incoming_transit_df = list_incoming_transit_requests_for_camp(my_camp)
         incoming_wh_df = list_incoming_warehouse_orders_for_camp(my_camp)
         my_awaiting_df = list_my_requested_awaiting_approval(my_camp)
+        my_rejected_df = list_my_recently_rejected(my_camp)
     except Exception:
         pending_out_df = pd.DataFrame()
         outgoing_transit_df = pd.DataFrame()
         incoming_transit_df = pd.DataFrame()
         incoming_wh_df = pd.DataFrame()
         my_awaiting_df = pd.DataFrame()
+        my_rejected_df = pd.DataFrame()
 
     actionable_n = len(pending_out_df) + len(incoming_transit_df) + len(incoming_wh_df)
-    if actionable_n > 0 or not my_awaiting_df.empty or not outgoing_transit_df.empty:
+    if (
+        actionable_n > 0
+        or not my_awaiting_df.empty
+        or not outgoing_transit_df.empty
+        or not my_rejected_df.empty
+    ):
         if actionable_n > 0:
             st.warning(
                 f"**{my_camp}** 앞으로 처리할 요청이 **{actionable_n}건** 있어요. "
@@ -380,6 +388,15 @@ elif my_camp:
                 st.caption(
                     f":material/schedule: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
                     f"{int(r['qty'])}개"
+                )
+
+        if not my_rejected_df.empty:
+            st.markdown("**내 요청 · 최근 7일 거절됨**")
+            for _, r in my_rejected_df.iterrows():
+                reason = r["reject_reason"] if pd.notna(r.get("reject_reason")) else "미기재"
+                st.caption(
+                    f":material/cancel: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
+                    f"{int(r['qty'])}개 · 거절자: {r['approved_by']} · 사유: {reason}"
                 )
 
 if auth["role"] == "admin":

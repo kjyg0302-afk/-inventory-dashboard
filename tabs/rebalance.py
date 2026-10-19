@@ -204,7 +204,8 @@ def render(ctx):
                         dc0.badge("입고완료", icon=":material/check_circle:", color="green")
                     else:
                         dc0.badge("거절", icon=":material/cancel:", color="red")
-                    dc1.caption(f"{r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · {who}")
+                    reason_suffix = f" · 사유: {r['reject_reason']}" if pd.notna(r.get("reject_reason")) else ""
+                    dc1.caption(f"{r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · {who}{reason_suffix}")
 
         if item_usage:
             weekly_totals = {}

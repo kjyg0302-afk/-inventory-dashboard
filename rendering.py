@@ -60,14 +60,18 @@ def render_pending_request_row(r, data, my_name, key_prefix=""):
                 list_transfer_requests.clear()
                 list_all_transfer_requests.clear()
                 st.rerun()
-    if c3.button("거절", key=f"{key_prefix}reject_{r['id']}"):
-        if not my_name.strip():
-            st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
-        else:
-            reject_transfer_request(r["id"], my_name.strip())
-            list_transfer_requests.clear()
-            list_all_transfer_requests.clear()
-            st.rerun()
+    with c3.popover("거절"):
+        reason = st.text_input("거절 사유", key=f"{key_prefix}reject_reason_{r['id']}")
+        if st.button("거절 확정", key=f"{key_prefix}reject_{r['id']}", type="primary"):
+            if not my_name.strip():
+                st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
+            elif not reason.strip():
+                st.error("거절 사유를 입력해주세요.", icon=":material/error:")
+            else:
+                reject_transfer_request(r["id"], my_name.strip(), reason.strip())
+                list_transfer_requests.clear()
+                list_all_transfer_requests.clear()
+                st.rerun()
 
 
 def render_in_transit_request_row(r, data, my_name, key_prefix=""):

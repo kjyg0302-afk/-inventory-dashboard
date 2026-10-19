@@ -79,6 +79,17 @@ def list_my_requested_awaiting_approval(camp):
     )
 
 
+def list_my_recently_rejected(camp, days=7):
+    """해당 캠프가 요청했다가 최근 거절된 목록 (사유 확인용, 정보성)."""
+    conn = get_db_connection()
+    return conn.query(
+        "select * from transfer_requests where to_camp = :camp and status = 'rejected' "
+        "and approved_at >= now() - make_interval(days => :days) order by approved_at desc",
+        params={"camp": camp, "days": days},
+        ttl=0,
+    )
+
+
 def create_transfer_request(item_code, item_name, from_camp, to_camp, qty, requested_by):
     conn = get_db_connection()
     with conn.session as session:
@@ -130,18 +141,19 @@ def approve_transfer_request(request_id, approved_by):
         )
 
 
-def reject_transfer_request(request_id, rejected_by):
+def reject_transfer_request(request_id, rejected_by, reason):
     conn = get_db_connection()
     with conn.session as session:
         session.execute(
             text(
                 """
                 update transfer_requests
-                set status = 'rejected', approved_by = :rejected_by, approved_at = now()
+                set status = 'rejected', approved_by = :rejected_by, approved_at = now(),
+                    reject_reason = :reason
                 where id = :id and status = 'requested'
                 """
             ),
-            {"id": request_id, "rejected_by": rejected_by},
+            {"id": request_id, "rejected_by": rejected_by, "reason": reason},
         )
         session.commit()
     r = _get_transfer_request(request_id)
@@ -149,7 +161,7 @@ def reject_transfer_request(request_id, rejected_by):
         send_camp_chat_notification(
             r["to_camp"],
             f"❌ 이관 요청이 거절됐어요\n{r['item_name']} · {int(r['qty'])}개 · "
-            f"{r['from_camp']} → {r['to_camp']}\n거절자: {rejected_by}",
+            f"{r['from_camp']} → {r['to_camp']}\n거절자: {rejected_by}\n사유: {reason}",
         )
 
 

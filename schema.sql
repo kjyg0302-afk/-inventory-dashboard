@@ -50,8 +50,12 @@ create table if not exists transfer_requests (
     approved_by text,
     approved_at timestamptz,
     received_by text,
-    received_at timestamptz
+    received_at timestamptz,
+    reject_reason text
 );
+
+-- 기존 DB에는 컬럼만 추가 (create table if not exists는 이미 있는 테이블엔 적용 안 됨)
+alter table transfer_requests add column if not exists reject_reason text;
 
 create index if not exists idx_transfer_requests_item on transfer_requests (item_code);
 create index if not exists idx_transfer_requests_status on transfer_requests (status);
