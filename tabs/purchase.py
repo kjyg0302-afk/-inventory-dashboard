@@ -2,6 +2,7 @@
 
 import streamlit as st
 
+from formatting import fmt_request_timeline
 from usage_data import camp_weekly_usage_rate
 from purchase_orders import (
     create_warehouse_order,
@@ -143,6 +144,7 @@ def render(ctx):
                     f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · "
                     f"요청자: {r['requested_by']}{reason_suffix}"
                 )
+                c2.caption(fmt_request_timeline(r))
                 if c3.button("승인", key=f"po_approve_{r['id']}"):
                     if not po_my_name.strip():
                         st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
@@ -180,7 +182,8 @@ def render(ctx):
                 reason_suffix = f" · 사유: {r['reason']}" if r.get("reason") else ""
                 st.caption(
                     f":material/schedule: {r['item_name']} ({r['item_code']}) → {r['to_camp']} · "
-                    f"{int(r['qty'])}개 · 요청자: {r['requested_by']}{reason_suffix} (창고 승인 대기중)"
+                    f"{int(r['qty'])}개 · 요청자: {r['requested_by']}{reason_suffix} (창고 승인 대기중) · "
+                    f"{fmt_request_timeline(r)}"
                 )
 
     if not po_in_transit.empty:
@@ -197,6 +200,7 @@ def render(ctx):
                     f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · "
                     f"승인자: {r['approved_by']}"
                 )
+                ic1.caption(fmt_request_timeline(r))
 
     if not po_done.empty:
         with st.expander(f"완료/거절 내역 ({len(po_done)}건)", icon=":material/history:"):
@@ -210,5 +214,6 @@ def render(ctx):
                     dc0.badge("거절", icon=":material/cancel:", color="red")
                 reason_suffix = f" · 사유: {r['reason']}" if r.get("reason") else ""
                 dc1.caption(
-                    f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · {who}{reason_suffix}"
+                    f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · {who}{reason_suffix} · "
+                    f"{fmt_request_timeline(r)}"
                 )

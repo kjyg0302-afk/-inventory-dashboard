@@ -12,6 +12,7 @@ import json
 import pandas as pd
 import streamlit as st
 
+from formatting import fmt_request_timeline
 from parsing import (
     parse_inventory_excel,
     parse_usage_excel,
@@ -369,7 +370,7 @@ elif my_camp:
             for _, r in outgoing_transit_df.iterrows():
                 st.caption(
                     f":material/local_shipping: {r['item_name']} · {int(r['qty'])}개 → **{r['to_camp']}** "
-                    f"(승인자: {r['approved_by']})"
+                    f"(승인자: {r['approved_by']}) · {fmt_request_timeline(r)}"
                 )
 
         if not incoming_transit_df.empty:
@@ -387,7 +388,7 @@ elif my_camp:
             for _, r in my_awaiting_df.iterrows():
                 st.caption(
                     f":material/schedule: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
-                    f"{int(r['qty'])}개"
+                    f"{int(r['qty'])}개 · {fmt_request_timeline(r)}"
                 )
 
         if not my_rejected_df.empty:
@@ -396,7 +397,7 @@ elif my_camp:
                 reason = r["reject_reason"] if pd.notna(r.get("reject_reason")) else "미기재"
                 st.caption(
                     f":material/cancel: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
-                    f"{int(r['qty'])}개 · 거절자: {r['approved_by']} · 사유: {reason}"
+                    f"{int(r['qty'])}개 · 거절자: {r['approved_by']} · 사유: {reason} · {fmt_request_timeline(r)}"
                 )
 
 if auth["role"] == "admin":

@@ -3,6 +3,7 @@
 
 import streamlit as st
 
+from formatting import fmt_request_timeline
 from stock_ops import find_item_by_code, deduct_camp_stock, add_camp_stock
 from app_data import save_data
 from transfers import (
@@ -29,6 +30,7 @@ def render_pending_request_row(r, data, my_name, key_prefix=""):
     c0, c1, c2, c3 = st.columns([1, 4, 1, 1])
     c0.badge("요청중", icon=":material/schedule:", color="orange")
     c1.write(f"{r['item_name']} · {r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · 요청자: {r['requested_by']}")
+    c1.caption(fmt_request_timeline(r))
     if c2.button("승인", key=f"{key_prefix}approve_{r['id']}"):
         if not my_name.strip():
             st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
@@ -87,6 +89,7 @@ def render_in_transit_request_row(r, data, my_name, key_prefix="", allow_revert=
         c0, c1, c2 = st.columns([1, 5, 1])
     c0.badge("이동중", icon=":material/local_shipping:", color="blue")
     c1.write(f"{r['item_name']} · {r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · 승인자: {r['approved_by']}")
+    c1.caption(fmt_request_timeline(r))
     if allow_revert:
         with c3.popover("승인 취소"):
             st.caption("요청중 상태로 되돌려요. 재고는 바뀌지 않고, 양쪽 캠프에 알림이 가요.")
@@ -129,6 +132,7 @@ def render_pending_warehouse_order_row(r, my_name, key_prefix=""):
         f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · "
         f"요청자: {r['requested_by']}{reason_suffix}"
     )
+    c0.caption(fmt_request_timeline(r))
     if c1.button("승인", key=f"{key_prefix}wh_po_approve_{r['id']}"):
         if not my_name.strip():
             st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
@@ -153,6 +157,7 @@ def render_incoming_warehouse_order_row(r, data, my_name, key_prefix=""):
     c1.write(
         f"{r['item_name']} ({r['item_code']}) → {r['to_camp']} · {int(r['qty'])}개 · 승인자: {r['approved_by']}"
     )
+    c1.caption(fmt_request_timeline(r))
     if c2.button("입고완료", key=f"{key_prefix}po_receive_{r['id']}"):
         if not my_name.strip():
             st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")

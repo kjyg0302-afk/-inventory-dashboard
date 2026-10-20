@@ -3,7 +3,7 @@
 import pandas as pd
 import streamlit as st
 
-from formatting import fmt_int, render_trend_chart
+from formatting import fmt_int, fmt_request_timeline, render_trend_chart
 from usage_calc import get_usage_for_code
 from transfers import list_all_transfer_requests, list_transfer_requests, create_transfer_request
 from rendering import render_pending_request_row, render_in_transit_request_row
@@ -179,7 +179,8 @@ def render(ctx):
                     # 내가 승인 주체가 아니라 내가 요청한 쪽(to_camp) — 진행 상황만 보여준다.
                     st.caption(
                         f":material/schedule: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
-                        f"{int(r['qty'])}개 · 요청자: {r['requested_by']} (상대 캠프 승인 대기중)"
+                        f"{int(r['qty'])}개 · 요청자: {r['requested_by']} (상대 캠프 승인 대기중) · "
+                        f"{fmt_request_timeline(r)}"
                     )
 
         if not in_transit_rows.empty:
@@ -191,7 +192,8 @@ def render(ctx):
                     # 내가 입고완료 주체가 아니라 보낸 쪽(from_camp) — 진행 상황만 보여준다.
                     st.caption(
                         f":material/local_shipping: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
-                        f"{int(r['qty'])}개 · 승인자: {r['approved_by']} (입고 대기중)"
+                        f"{int(r['qty'])}개 · 승인자: {r['approved_by']} (입고 대기중) · "
+                        f"{fmt_request_timeline(r)}"
                     )
 
         if not done_rows.empty and auth["role"] == "admin":
@@ -205,7 +207,10 @@ def render(ctx):
                     else:
                         dc0.badge("거절", icon=":material/cancel:", color="red")
                     reason_suffix = f" · 사유: {r['reject_reason']}" if pd.notna(r.get("reject_reason")) else ""
-                    dc1.caption(f"{r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · {who}{reason_suffix}")
+                    dc1.caption(
+                        f"{r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · {who}{reason_suffix} · "
+                        f"{fmt_request_timeline(r)}"
+                    )
 
         if item_usage:
             weekly_totals = {}

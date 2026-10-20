@@ -1,8 +1,12 @@
 """숫자 포맷 및 차트 렌더링 공용 유틸리티."""
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import altair as alt
+import pandas as pd
+
+# 한국은 서머타임이 없어서 고정 오프셋으로 충분하다 (윈도우 로컬엔 tzdata가 없어 ZoneInfo가 실패할 수 있음).
+KST = timezone(timedelta(hours=9))
 
 
 def fmt_int(n):
@@ -19,6 +23,40 @@ def monthly_mean_excluding_current(monthly_series):
     current_month = datetime.now().strftime("%Y-%m")
     completed = monthly_series.drop(index=current_month, errors="ignore")
     return completed.mean() if not completed.empty else monthly_series.mean()
+
+
+def _to_kst(ts):
+    if ts is None or pd.isna(ts):
+        return None
+    ts = pd.Timestamp(ts)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    return ts.tz_convert(KST)
+
+
+def fmt_request_timeline(r):
+    """이관/발주 요청 한 건의 요청일·승인(거절)일·입고일과 경과(소요)일을 한 줄로.
+    진행중(요청중/이동중)이면 요청일로부터 오늘까지 경과일, 입고완료면 요청→입고 소요일."""
+    status = r.get("status")
+    today = datetime.now(KST).date()
+    req, appr, recv = (_to_kst(r.get(k)) for k in ("requested_at", "approved_at", "received_at"))
+
+    def md(ts):
+        return ts.strftime("%m/%d") if ts.year == today.year else ts.strftime("%Y/%m/%d")
+
+    parts = []
+    if req is not None:
+        parts.append(f"요청 {md(req)}")
+    if appr is not None:
+        parts.append(f"{'거절' if status == 'rejected' else '승인'} {md(appr)}")
+    if recv is not None:
+        parts.append(f"입고 {md(recv)}")
+    if req is not None:
+        if status in ("requested", "in_transit"):
+            parts.append(f"경과 {(today - req.date()).days}일")
+        elif status == "completed" and recv is not None:
+            parts.append(f"소요 {(recv.date() - req.date()).days}일")
+    return " · ".join(parts)
 
 
 ACCENT = "#5B8DEF"
