@@ -39,7 +39,7 @@ def render(ctx):
                 if not all_in_transit.empty:
                     st.markdown("**이동중**")
                     for _, r in all_in_transit.iterrows():
-                        render_in_transit_request_row(r, data, admin_tr_name, key_prefix="all_")
+                        render_in_transit_request_row(r, data, admin_tr_name, key_prefix="all_", allow_revert=True)
 
     st.caption("품목을 선택하면 캠프별 재고 편차를 확인할 수 있어요")
     query = st.text_input("재분배를 검토할 품목명 또는 번호 입력", "", key="rebalance_query")

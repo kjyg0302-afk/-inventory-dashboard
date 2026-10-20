@@ -165,6 +165,32 @@ def reject_transfer_request(request_id, rejected_by, reason):
         )
 
 
+def revert_transfer_approval(request_id, reverted_by):
+    """잘못 누른 승인을 되돌려 요청중으로 돌린다 (관리자 전용). 승인 단계에서는 재고가
+    움직이지 않으므로 상태만 되돌리면 된다 — 입고완료된 건은 대상이 아니다."""
+    conn = get_db_connection()
+    with conn.session as session:
+        session.execute(
+            text(
+                """
+                update transfer_requests
+                set status = 'requested', approved_by = null, approved_at = null
+                where id = :id and status = 'in_transit'
+                """
+            ),
+            {"id": request_id},
+        )
+        session.commit()
+    r = _get_transfer_request(request_id)
+    if r is not None:
+        msg = (
+            f"↩️ 이관 승인이 취소되어 다시 요청중이에요\n{r['item_name']} · {int(r['qty'])}개 · "
+            f"{r['from_camp']} → {r['to_camp']}\n처리자: {reverted_by}"
+        )
+        send_camp_chat_notification(r["from_camp"], msg + "\n다시 확인 후 승인/거절해주세요.")
+        send_camp_chat_notification(r["to_camp"], msg + "\n아직 발송되지 않은 상태예요.")
+
+
 def complete_transfer_request(request_id, received_by, amt):
     """입고완료 처리. 실제 이동한 금액(amt)을 함께 기록한다."""
     conn = get_db_connection()

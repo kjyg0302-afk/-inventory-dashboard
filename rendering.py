@@ -11,6 +11,7 @@ from transfers import (
     approve_transfer_request,
     reject_transfer_request,
     complete_transfer_request,
+    revert_transfer_approval,
 )
 from purchase_orders import (
     list_warehouse_orders,
@@ -74,14 +75,29 @@ def render_pending_request_row(r, data, my_name, key_prefix=""):
                 st.rerun()
 
 
-def render_in_transit_request_row(r, data, my_name, key_prefix=""):
+def render_in_transit_request_row(r, data, my_name, key_prefix="", allow_revert=False):
     """이동중 상태인 이관 요청 한 건을 표시하고 입고완료 버튼을 처리한다.
     로그인 배너의 "입고 확인 필요" 목록과 재분배 도우미 탭 양쪽에서 재사용한다.
     물류창고는 이 앱의 캠프 재고 데이터에 없어서, 물류창고가 보내거나 받는 쪽이면
-    그쪽의 재고 증감 계산만 건너뛴다 (박스히어로 쪽 실제 재고는 창고에서 수동으로 맞춤)."""
-    c0, c1, c2 = st.columns([1, 5, 1])
+    그쪽의 재고 증감 계산만 건너뛴다 (박스히어로 쪽 실제 재고는 창고에서 수동으로 맞춤).
+    allow_revert=True(관리자 전체 현황)이면 잘못 누른 승인을 되돌리는 버튼도 보여준다."""
+    if allow_revert:
+        c0, c1, c2, c3 = st.columns([1, 4, 1, 1])
+    else:
+        c0, c1, c2 = st.columns([1, 5, 1])
     c0.badge("이동중", icon=":material/local_shipping:", color="blue")
     c1.write(f"{r['item_name']} · {r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · 승인자: {r['approved_by']}")
+    if allow_revert:
+        with c3.popover("승인 취소"):
+            st.caption("요청중 상태로 되돌려요. 재고는 바뀌지 않고, 양쪽 캠프에 알림이 가요.")
+            if st.button("취소 확정", key=f"{key_prefix}revert_{r['id']}", type="primary"):
+                if not my_name.strip():
+                    st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
+                else:
+                    revert_transfer_approval(r["id"], my_name.strip())
+                    list_transfer_requests.clear()
+                    list_all_transfer_requests.clear()
+                    st.rerun()
     if c2.button("입고완료", key=f"{key_prefix}receive_{r['id']}"):
         if not my_name.strip():
             st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
