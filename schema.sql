@@ -260,6 +260,40 @@ create table if not exists vendor_order_items (
     updated_at timestamptz not null default now()
 );
 
+-- PO(발주서) 정보: PO번호(GBIKE-연도PO_일련번호), 발주일, 납기일(PO당 하나), 통화(PO당 하나).
+alter table vendor_orders add column if not exists po_number text unique;
+alter table vendor_orders add column if not exists po_date date;
+alter table vendor_orders add column if not exists due_date date;
+alter table vendor_orders add column if not exists currency text default 'USD';
+-- 라인별 거래처 부품번호(나인봇 AB.xx)와 포장단위(MPQ). 발주서 출력에 쓴다.
+alter table vendor_order_items add column if not exists package_no text;
+alter table vendor_order_items add column if not exists mpq numeric;
+
+-- 발주서 엑셀 양식 원본. 가장 최근 업로드가 현재 양식.
+-- 나인봇 단가가 들어있어서 공개 GitHub 저장소 대신 DB에 보관한다 (readonly_viewer 권한 미부여).
+create table if not exists po_templates (
+    id bigserial primary key,
+    file_name text not null,
+    file_bytes bytea not null,
+    uploaded_by text,
+    uploaded_at timestamptz not null default now()
+);
+
+-- 양식의 "부품 정보 RAWDATA" 시트에서 뽑은 부품 카탈로그. 양식을 올릴 때마다 통째로 교체.
+create table if not exists parts_catalog (
+    package_no text primary key,   -- 거래처(나인봇) 부품번호 AB.xx
+    sku text,                      -- 우리 SKU (앱 품목코드와 같은 체계)
+    name_ko text,
+    desc_en text,
+    mpq numeric,                   -- 포장 단위
+    price_low numeric,             -- 단가 (1-499)
+    price_high numeric,            -- 단가 (500-5000), 양식 수식이 쓰는 기본 단가
+    category text,
+    updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_parts_catalog_sku on parts_catalog (sku);
+
 create index if not exists idx_vendor_order_items_order on vendor_order_items (vendor_order_id);
 create index if not exists idx_vendor_order_items_item on vendor_order_items (item_code);
 create index if not exists idx_vendor_order_items_status on vendor_order_items (status);

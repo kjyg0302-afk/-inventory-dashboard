@@ -1,3 +1,6 @@
 __pycache__/
 .streamlit/secrets.toml
 data/
+# 발주서 양식(단가 포함)·사용량 원본 엑셀 — 저장소가 공개라 절대 커밋하지 않는다
+*.xlsx
+*.xls
