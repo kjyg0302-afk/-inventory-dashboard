@@ -56,6 +56,12 @@ create table if not exists transfer_requests (
 
 -- 기존 DB에는 컬럼만 추가 (create table if not exists는 이미 있는 테이블엔 적용 안 됨)
 alter table transfer_requests add column if not exists reject_reason text;
+-- 수량 조정: qty는 "보낼(승인된) 수량", requested_qty는 처음 요청 수량, received_qty는
+-- 받는 캠프가 검수 후 실제로 입고한 수량. 보내는 캠프가 가능한 만큼만 승인하거나,
+-- 받는 캠프가 실제 받은 수량으로 입고처리할 수 있어서 세 값이 다를 수 있다.
+alter table transfer_requests add column if not exists requested_qty integer;
+alter table transfer_requests add column if not exists received_qty integer;
+update transfer_requests set requested_qty = qty where requested_qty is null;
 
 create index if not exists idx_transfer_requests_item on transfer_requests (item_code);
 create index if not exists idx_transfer_requests_status on transfer_requests (status);

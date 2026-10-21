@@ -12,7 +12,7 @@ import json
 import pandas as pd
 import streamlit as st
 
-from formatting import fmt_request_timeline
+from formatting import fmt_request_timeline, fmt_transfer_qty
 from parsing import (
     parse_inventory_excel,
     parse_usage_excel,
@@ -369,7 +369,7 @@ elif my_camp:
             st.markdown("**📤 발송해야 할 물건 (승인됨 · 받는 캠프가 입고완료 누르면 사라져요)**")
             for _, r in outgoing_transit_df.iterrows():
                 st.caption(
-                    f":material/local_shipping: {r['item_name']} · {int(r['qty'])}개 → **{r['to_camp']}** "
+                    f":material/local_shipping: {r['item_name']} · {fmt_transfer_qty(r)} → **{r['to_camp']}** "
                     f"(승인자: {r['approved_by']}) · {fmt_request_timeline(r)}"
                 )
 
@@ -388,7 +388,7 @@ elif my_camp:
             for _, r in my_awaiting_df.iterrows():
                 st.caption(
                     f":material/schedule: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
-                    f"{int(r['qty'])}개 · {fmt_request_timeline(r)}"
+                    f"{fmt_transfer_qty(r)} · {fmt_request_timeline(r)}"
                 )
 
         if not my_rejected_df.empty:
@@ -397,7 +397,7 @@ elif my_camp:
                 reason = r["reject_reason"] if pd.notna(r.get("reject_reason")) else "미기재"
                 st.caption(
                     f":material/cancel: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
-                    f"{int(r['qty'])}개 · 거절자: {r['approved_by']} · 사유: {reason} · {fmt_request_timeline(r)}"
+                    f"{fmt_transfer_qty(r)} · 거절자: {r['approved_by']} · 사유: {reason} · {fmt_request_timeline(r)}"
                 )
 
 if auth["role"] == "admin":

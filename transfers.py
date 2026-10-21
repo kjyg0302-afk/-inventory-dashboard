@@ -5,6 +5,7 @@ from sqlalchemy import text
 
 from db import get_db_connection
 from chat_notify import send_camp_chat_notification
+from formatting import fmt_transfer_qty
 
 
 def _get_transfer_request(request_id):
@@ -79,6 +80,23 @@ def list_my_requested_awaiting_approval(camp):
     )
 
 
+def list_transfer_requests_for_camp(camp, days=30):
+    """품목 검색 없이, 해당 캠프가 보내거나 받는 이관 요청 전체 — 진행중(요청중/이동중)은 기간과
+    상관없이 전부, 완료/거절은 최근 days일 것만."""
+    conn = get_db_connection()
+    return conn.query(
+        """
+        select * from transfer_requests
+        where (from_camp = :camp or to_camp = :camp)
+          and (status in ('requested', 'in_transit')
+               or coalesce(received_at, approved_at, requested_at) >= now() - make_interval(days => :days))
+        order by requested_at desc
+        """,
+        params={"camp": camp, "days": days},
+        ttl=0,
+    )
+
+
 def list_my_recently_rejected(camp, days=7):
     """해당 캠프가 요청했다가 최근 거절된 목록 (사유 확인용, 정보성)."""
     conn = get_db_connection()
@@ -96,8 +114,9 @@ def create_transfer_request(item_code, item_name, from_camp, to_camp, qty, reque
         session.execute(
             text(
                 """
-                insert into transfer_requests (item_code, item_name, from_camp, to_camp, qty, requested_by)
-                values (:item_code, :item_name, :from_camp, :to_camp, :qty, :requested_by)
+                insert into transfer_requests
+                    (item_code, item_name, from_camp, to_camp, qty, requested_qty, requested_by)
+                values (:item_code, :item_name, :from_camp, :to_camp, :qty, :qty, :requested_by)
                 """
             ),
             {
@@ -117,26 +136,30 @@ def create_transfer_request(item_code, item_name, from_camp, to_camp, qty, reque
     )
 
 
-def approve_transfer_request(request_id, approved_by):
-    """요청을 승인하고 이동중 상태로 전환. 실제 재고 차감은 입고완료 시점에 이루어진다."""
+def approve_transfer_request(request_id, approved_by, approved_qty):
+    """요청을 승인하고 이동중 상태로 전환. 보내는 캠프가 가능한 수량만큼만 승인할 수 있어서
+    qty를 승인 수량으로 바꾸고, 원래 요청 수량은 requested_qty에 남긴다.
+    (UPDATE의 우변은 모두 갱신 전 값을 보므로 requested_qty에는 원래 qty가 들어간다.)
+    실제 재고 차감은 입고완료 시점에 이루어진다."""
     conn = get_db_connection()
     with conn.session as session:
         session.execute(
             text(
                 """
                 update transfer_requests
-                set status = 'in_transit', approved_by = :approved_by, approved_at = now()
+                set status = 'in_transit', approved_by = :approved_by, approved_at = now(),
+                    requested_qty = coalesce(requested_qty, qty), qty = :approved_qty
                 where id = :id and status = 'requested'
                 """
             ),
-            {"id": request_id, "approved_by": approved_by},
+            {"id": request_id, "approved_by": approved_by, "approved_qty": int(approved_qty)},
         )
         session.commit()
     r = _get_transfer_request(request_id)
     if r is not None:
         send_camp_chat_notification(
             r["to_camp"],
-            f"✅ 이관 요청이 승인되어 이동중이에요\n{r['item_name']} · {int(r['qty'])}개 · "
+            f"✅ 이관 요청이 승인되어 이동중이에요\n{r['item_name']} · {fmt_transfer_qty(r)} · "
             f"{r['from_camp']} → {r['to_camp']}\n승인자: {approved_by}\n물건 받으면 입고완료 눌러주세요.",
         )
 
@@ -174,7 +197,8 @@ def revert_transfer_approval(request_id, reverted_by):
             text(
                 """
                 update transfer_requests
-                set status = 'requested', approved_by = null, approved_at = null
+                set status = 'requested', approved_by = null, approved_at = null,
+                    qty = coalesce(requested_qty, qty)
                 where id = :id and status = 'in_transit'
                 """
             ),
@@ -191,25 +215,26 @@ def revert_transfer_approval(request_id, reverted_by):
         send_camp_chat_notification(r["to_camp"], msg + "\n아직 발송되지 않은 상태예요.")
 
 
-def complete_transfer_request(request_id, received_by, amt):
-    """입고완료 처리. 실제 이동한 금액(amt)을 함께 기록한다."""
+def complete_transfer_request(request_id, received_by, amt, received_qty):
+    """입고완료 처리. 받는 캠프가 검수한 실제 수량(received_qty)과 이동 금액(amt)을 기록한다."""
     conn = get_db_connection()
     with conn.session as session:
         session.execute(
             text(
                 """
                 update transfer_requests
-                set status = 'completed', received_by = :received_by, received_at = now(), amt = :amt
+                set status = 'completed', received_by = :received_by, received_at = now(), amt = :amt,
+                    received_qty = :received_qty
                 where id = :id and status = 'in_transit'
                 """
             ),
-            {"id": request_id, "received_by": received_by, "amt": amt},
+            {"id": request_id, "received_by": received_by, "amt": amt, "received_qty": int(received_qty)},
         )
         session.commit()
     r = _get_transfer_request(request_id)
     if r is not None:
         send_camp_chat_notification(
             r["from_camp"],
-            f"📬 이관이 입고완료 처리됐어요\n{r['item_name']} · {int(r['qty'])}개 · "
+            f"📬 이관이 입고완료 처리됐어요\n{r['item_name']} · {fmt_transfer_qty(r)} · "
             f"{r['from_camp']} → {r['to_camp']}\n입고 확인자: {received_by}",
         )

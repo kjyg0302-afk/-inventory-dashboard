@@ -3,7 +3,7 @@
 
 import streamlit as st
 
-from formatting import fmt_request_timeline
+from formatting import fmt_request_timeline, fmt_transfer_qty
 from stock_ops import find_item_by_code, deduct_camp_stock, add_camp_stock
 from app_data import save_data
 from transfers import (
@@ -27,42 +27,49 @@ def render_pending_request_row(r, data, my_name, key_prefix=""):
     로그인 배너의 "내 요청함"과 재분배 도우미 탭 양쪽에서 재사용한다.
     모든 탭이 매 rerun마다 함께 그려지는 Streamlit 특성상, 같은 요청이 배너와 탭에
     동시에 나타날 수 있어 key_prefix로 위젯 키가 겹치지 않게 한다."""
+    req_qty = int(r["qty"])
     c0, c1, c2, c3 = st.columns([1, 4, 1, 1])
     c0.badge("요청중", icon=":material/schedule:", color="orange")
-    c1.write(f"{r['item_name']} · {r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · 요청자: {r['requested_by']}")
+    c1.write(f"{r['item_name']} · {r['from_camp']} → {r['to_camp']} · {fmt_transfer_qty(r)} · 요청자: {r['requested_by']}")
     c1.caption(fmt_request_timeline(r))
-    if c2.button("승인", key=f"{key_prefix}approve_{r['id']}"):
-        if not my_name.strip():
-            st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
-        elif r["from_camp"] == "물류창고":
-            # 물류창고 재고는 이 앱의 캠프 재고 데이터에 없어서(박스히어로 쪽에서 별도 관리)
-            # 가용재고 검증을 건너뛴다.
-            approve_transfer_request(r["id"], my_name.strip())
-            st.success("승인했습니다. 이동중 상태로 전환됩니다.", icon=":material/task_alt:")
-            list_transfer_requests.clear()
-            list_all_transfer_requests.clear()
-            st.rerun()
-        else:
-            item = find_item_by_code(data, r["item_code"])
-            current_qty = item["x"].get(r["from_camp"], [0, 0])[0] if item else 0
-            req_df_all = list_transfer_requests(r["item_code"])
-            already_out = int(
-                req_df_all[
-                    (req_df_all["status"] == "in_transit") & (req_df_all["from_camp"] == r["from_camp"])
-                ]["qty"].sum()
-            )
-            available = current_qty - already_out
-            if available < r["qty"]:
-                st.error(
-                    f"{r['from_camp']}의 가용재고가 부족합니다. (가용 {available}개, 요청 {int(r['qty'])}개)",
-                    icon=":material/error:",
-                )
-            else:
-                approve_transfer_request(r["id"], my_name.strip())
-                st.success("승인했습니다. 이동중 상태로 전환됩니다.", icon=":material/task_alt:")
+    with c2.popover("승인"):
+        # 보내는 캠프가 가진 만큼만 보낼 수 있게 승인 수량을 줄일 수 있다 (요청 수량보다 많이는 불가).
+        send_qty = st.number_input(
+            "보낼 수량", min_value=1, max_value=req_qty, value=req_qty, step=1,
+            key=f"{key_prefix}approve_qty_{r['id']}",
+        )
+        if send_qty < req_qty:
+            st.caption(f"요청 {req_qty}개 중 {int(send_qty)}개만 보내요. 요청한 캠프에 조정된 수량으로 알림이 가요.")
+        if st.button("승인 확정", key=f"{key_prefix}approve_{r['id']}", type="primary"):
+            if not my_name.strip():
+                st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
+            elif r["from_camp"] == "물류창고":
+                # 물류창고 재고는 이 앱의 캠프 재고 데이터에 없어서(박스히어로 쪽에서 별도 관리)
+                # 가용재고 검증을 건너뛴다.
+                approve_transfer_request(r["id"], my_name.strip(), send_qty)
                 list_transfer_requests.clear()
                 list_all_transfer_requests.clear()
                 st.rerun()
+            else:
+                item = find_item_by_code(data, r["item_code"])
+                current_qty = item["x"].get(r["from_camp"], [0, 0])[0] if item else 0
+                req_df_all = list_transfer_requests(r["item_code"])
+                already_out = int(
+                    req_df_all[
+                        (req_df_all["status"] == "in_transit") & (req_df_all["from_camp"] == r["from_camp"])
+                    ]["qty"].sum()
+                )
+                available = current_qty - already_out
+                if available < send_qty:
+                    st.error(
+                        f"{r['from_camp']}의 가용재고가 부족합니다. (가용 {available}개, 보낼 수량 {int(send_qty)}개)",
+                        icon=":material/error:",
+                    )
+                else:
+                    approve_transfer_request(r["id"], my_name.strip(), send_qty)
+                    list_transfer_requests.clear()
+                    list_all_transfer_requests.clear()
+                    st.rerun()
     with c3.popover("거절"):
         reason = st.text_input("거절 사유", key=f"{key_prefix}reject_reason_{r['id']}")
         if st.button("거절 확정", key=f"{key_prefix}reject_{r['id']}", type="primary"):
@@ -88,7 +95,7 @@ def render_in_transit_request_row(r, data, my_name, key_prefix="", allow_revert=
     else:
         c0, c1, c2 = st.columns([1, 5, 1])
     c0.badge("이동중", icon=":material/local_shipping:", color="blue")
-    c1.write(f"{r['item_name']} · {r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · 승인자: {r['approved_by']}")
+    c1.write(f"{r['item_name']} · {r['from_camp']} → {r['to_camp']} · {fmt_transfer_qty(r)} · 승인자: {r['approved_by']}")
     c1.caption(fmt_request_timeline(r))
     if allow_revert:
         with c3.popover("승인 취소"):
@@ -101,27 +108,35 @@ def render_in_transit_request_row(r, data, my_name, key_prefix="", allow_revert=
                     list_transfer_requests.clear()
                     list_all_transfer_requests.clear()
                     st.rerun()
-    if c2.button("입고완료", key=f"{key_prefix}receive_{r['id']}"):
-        if not my_name.strip():
-            st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
-        else:
-            item = find_item_by_code(data, r["item_code"])
-            try:
-                if r["from_camp"] == "물류창고":
-                    moved_amt = 0
-                else:
-                    moved_amt = deduct_camp_stock(item, r["from_camp"], int(r["qty"]))
-            except ValueError as e:
-                st.error(str(e), icon=":material/error:")
+    sent_qty = int(r["qty"])
+    with c2.popover("입고완료"):
+        # 검수 결과 실제로 받은 수량으로 입고처리한다. 승인 수량과 다르면 받은 수량 기준으로
+        # 양쪽 재고가 움직이고, 차이는 요청/승인/입고 수량으로 기록에 남는다.
+        recv_qty = st.number_input(
+            "실제 받은 수량", min_value=1, value=sent_qty, step=1, key=f"{key_prefix}receive_qty_{r['id']}"
+        )
+        if recv_qty != sent_qty:
+            st.caption(f"승인 수량({sent_qty}개)과 달라요. 받은 {int(recv_qty)}개 기준으로 재고가 옮겨지고 차이는 기록돼요.")
+        if st.button("입고 확정", key=f"{key_prefix}receive_{r['id']}", type="primary"):
+            if not my_name.strip():
+                st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
             else:
-                if r["to_camp"] != "물류창고":
-                    add_camp_stock(item, r["to_camp"], int(r["qty"]), moved_amt)
-                save_data("inventory", data)
-                complete_transfer_request(r["id"], my_name.strip(), moved_amt)
-                st.success("입고 완료 처리했습니다.", icon=":material/inventory_2:")
-                list_transfer_requests.clear()
-                list_all_transfer_requests.clear()
-                st.rerun()
+                item = find_item_by_code(data, r["item_code"])
+                try:
+                    if r["from_camp"] == "물류창고":
+                        moved_amt = 0
+                    else:
+                        moved_amt = deduct_camp_stock(item, r["from_camp"], int(recv_qty))
+                except ValueError as e:
+                    st.error(str(e), icon=":material/error:")
+                else:
+                    if r["to_camp"] != "물류창고":
+                        add_camp_stock(item, r["to_camp"], int(recv_qty), moved_amt)
+                    save_data("inventory", data)
+                    complete_transfer_request(r["id"], my_name.strip(), moved_amt, recv_qty)
+                    list_transfer_requests.clear()
+                    list_all_transfer_requests.clear()
+                    st.rerun()
 
 
 def render_pending_warehouse_order_row(r, my_name, key_prefix=""):

@@ -59,6 +59,24 @@ def fmt_request_timeline(r):
     return " · ".join(parts)
 
 
+def fmt_transfer_qty(r):
+    """캠프 간 이관 수량을 단계별로 표시. 요청(requested_qty)·승인(qty)·입고(received_qty)
+    수량이 모두 같으면 "10개", 중간에 조정됐으면 "요청 10 → 승인 5 → 입고 5개"처럼 보여준다."""
+    appr = int(r["qty"])
+    req = int(r["requested_qty"]) if pd.notna(r.get("requested_qty")) else appr
+    rec = int(r["received_qty"]) if pd.notna(r.get("received_qty")) else None
+    status = r.get("status")
+    if status in ("requested", "rejected"):
+        return f"{req}개"
+    if status == "completed" and rec is not None:
+        if req == appr == rec:
+            return f"{rec}개"
+        return f"요청 {req} → 승인 {appr} → 입고 {rec}개"
+    if appr != req:
+        return f"요청 {req} → 승인 {appr}개"
+    return f"{appr}개"
+
+
 ACCENT = "#5B8DEF"
 CHART_GRID = "#20293A"
 CHART_MUTED = "#8A96A8"

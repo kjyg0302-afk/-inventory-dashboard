@@ -3,10 +3,78 @@
 import pandas as pd
 import streamlit as st
 
-from formatting import fmt_int, fmt_request_timeline, render_trend_chart
+from formatting import fmt_int, fmt_request_timeline, fmt_transfer_qty, render_trend_chart
 from usage_calc import get_usage_for_code
-from transfers import list_all_transfer_requests, list_transfer_requests, create_transfer_request
+from transfers import (
+    list_all_transfer_requests,
+    list_transfer_requests,
+    list_transfer_requests_for_camp,
+    create_transfer_request,
+)
 from rendering import render_pending_request_row, render_in_transit_request_row
+
+
+def _render_my_camp_transfers(data, camp):
+    """품목을 검색하지 않아도 내 캠프가 보내거나 받는 이관 요청을 한눈에 본다.
+    진행중은 전부, 완료/거절은 최근 30일만."""
+    with st.expander(f"📋 {camp} 재고이관 현황 (요청한 건 · 요청받은 건)", icon=":material/list_alt:", expanded=True):
+        df = list_transfer_requests_for_camp(camp)
+        if df.empty:
+            st.caption("최근 30일간 이 캠프와 관련된 이관 요청이 없어요.")
+            return
+
+        my_name = st.text_input(
+            "내 이름 (승인/거절/입고완료 시 기록)",
+            value=st.session_state.get("transfer_my_name", ""),
+            key="rebalance_mine_name_input",
+        )
+        st.session_state["transfer_my_name"] = my_name
+
+        to_approve = df[(df["status"] == "requested") & (df["from_camp"] == camp)]
+        to_receive = df[(df["status"] == "in_transit") & (df["to_camp"] == camp)]
+        my_waiting = df[(df["status"] == "requested") & (df["to_camp"] == camp)]
+        to_send = df[(df["status"] == "in_transit") & (df["from_camp"] == camp)]
+        done = df[df["status"].isin(["completed", "rejected"])]
+
+        if not to_approve.empty:
+            st.markdown("**요청받은 건 · 승인/거절 필요**")
+            for _, r in to_approve.iterrows():
+                render_pending_request_row(r, data, my_name, key_prefix="mine_")
+        if not to_receive.empty:
+            st.markdown("**받을 물건 · 입고 확인 필요**")
+            for _, r in to_receive.iterrows():
+                render_in_transit_request_row(r, data, my_name, key_prefix="mine_")
+        if not my_waiting.empty:
+            st.markdown("**내가 요청한 건 · 상대 캠프 승인 대기중**")
+            for _, r in my_waiting.iterrows():
+                st.caption(
+                    f":material/schedule: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
+                    f"{fmt_transfer_qty(r)} · 요청자: {r['requested_by']} · {fmt_request_timeline(r)}"
+                )
+        if not to_send.empty:
+            st.markdown("**보낼 물건 · 승인됨 (받는 캠프 입고완료 대기)**")
+            for _, r in to_send.iterrows():
+                st.caption(
+                    f":material/local_shipping: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
+                    f"{fmt_transfer_qty(r)} · 승인자: {r['approved_by']} · {fmt_request_timeline(r)}"
+                )
+        if to_approve.empty and to_receive.empty and my_waiting.empty and to_send.empty:
+            st.caption("지금 진행 중인 이관 요청은 없어요.")
+
+        if not done.empty:
+            with st.expander(f"최근 30일 완료/거절 내역 ({len(done)}건)", icon=":material/history:"):
+                for _, r in done.iterrows():
+                    direction = "보냄" if r["from_camp"] == camp else "받음"
+                    dc0, dc1 = st.columns([1, 5])
+                    if r["status"] == "completed":
+                        dc0.badge(f"입고완료·{direction}", icon=":material/check_circle:", color="green")
+                    else:
+                        dc0.badge(f"거절·{direction}", icon=":material/cancel:", color="red")
+                    reason_suffix = f" · 사유: {r['reject_reason']}" if pd.notna(r.get("reject_reason")) else ""
+                    dc1.caption(
+                        f"{r['item_name']} · {r['from_camp']} → {r['to_camp']} · {fmt_transfer_qty(r)}"
+                        f"{reason_suffix} · {fmt_request_timeline(r)}"
+                    )
 
 
 def render(ctx):
@@ -40,6 +108,9 @@ def render(ctx):
                     st.markdown("**이동중**")
                     for _, r in all_in_transit.iterrows():
                         render_in_transit_request_row(r, data, admin_tr_name, key_prefix="all_", allow_revert=True)
+
+    if my_login_camp:
+        _render_my_camp_transfers(data, my_login_camp)
 
     st.caption("품목을 선택하면 캠프별 재고 편차를 확인할 수 있어요")
     query = st.text_input("재분배를 검토할 품목명 또는 번호 입력", "", key="rebalance_query")
@@ -179,7 +250,7 @@ def render(ctx):
                     # 내가 승인 주체가 아니라 내가 요청한 쪽(to_camp) — 진행 상황만 보여준다.
                     st.caption(
                         f":material/schedule: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
-                        f"{int(r['qty'])}개 · 요청자: {r['requested_by']} (상대 캠프 승인 대기중) · "
+                        f"{fmt_transfer_qty(r)} · 요청자: {r['requested_by']} (상대 캠프 승인 대기중) · "
                         f"{fmt_request_timeline(r)}"
                     )
 
@@ -192,7 +263,7 @@ def render(ctx):
                     # 내가 입고완료 주체가 아니라 보낸 쪽(from_camp) — 진행 상황만 보여준다.
                     st.caption(
                         f":material/local_shipping: {r['item_name']} · {r['from_camp']} → {r['to_camp']} · "
-                        f"{int(r['qty'])}개 · 승인자: {r['approved_by']} (입고 대기중) · "
+                        f"{fmt_transfer_qty(r)} · 승인자: {r['approved_by']} (입고 대기중) · "
                         f"{fmt_request_timeline(r)}"
                     )
 
@@ -208,7 +279,7 @@ def render(ctx):
                         dc0.badge("거절", icon=":material/cancel:", color="red")
                     reason_suffix = f" · 사유: {r['reject_reason']}" if pd.notna(r.get("reject_reason")) else ""
                     dc1.caption(
-                        f"{r['from_camp']} → {r['to_camp']} · {int(r['qty'])}개 · {who}{reason_suffix} · "
+                        f"{r['from_camp']} → {r['to_camp']} · {fmt_transfer_qty(r)} · {who}{reason_suffix} · "
                         f"{fmt_request_timeline(r)}"
                     )
 
