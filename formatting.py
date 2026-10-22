@@ -78,8 +78,36 @@ def fmt_transfer_qty(r):
 
 
 ACCENT = "#5B8DEF"
+ACCENT_2 = "#F2A65A"
 CHART_GRID = "#20293A"
 CHART_MUTED = "#8A96A8"
+
+
+def render_compare_chart(df, x_col, series_col, y_col, series_colors, height=240):
+    """두 개 이상 계열을 같은 축에 선으로 비교한다 (render_trend_chart와 같은 다크 테마 스타일).
+    series_colors: {계열명: 색} — 범례 순서도 이 순서."""
+    axis = dict(labelColor=CHART_MUTED, labelFontSize=11, domain=False, ticks=False)
+    return (
+        alt.Chart(df)
+        .mark_line(interpolate="monotone", strokeWidth=2.5, point=alt.OverlayMarkDef(filled=True, size=50))
+        .encode(
+            x=alt.X(f"{x_col}:O", sort=None, title=None, axis=alt.Axis(grid=False, **axis)),
+            y=alt.Y(f"{y_col}:Q", title=None, axis=alt.Axis(gridColor=CHART_GRID, tickCount=4, **axis)),
+            color=alt.Color(
+                f"{series_col}:N",
+                scale=alt.Scale(domain=list(series_colors), range=list(series_colors.values())),
+                legend=alt.Legend(title=None, orient="top", labelColor=CHART_MUTED),
+            ),
+            tooltip=[
+                alt.Tooltip(f"{x_col}:O", title=x_col),
+                alt.Tooltip(f"{series_col}:N", title="구분"),
+                alt.Tooltip(f"{y_col}:Q", title=y_col, format=",.0f"),
+            ],
+        )
+        .properties(height=height)
+        .configure_view(strokeWidth=0)
+        .configure(background="transparent")
+    )
 
 
 def render_trend_chart(df, x_col, y_col, height=220):

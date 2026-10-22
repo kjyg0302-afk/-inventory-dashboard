@@ -3,6 +3,7 @@
 from datetime import datetime
 
 import pandas as pd
+import streamlit as st
 from sqlalchemy import text
 
 from db import get_db_connection
@@ -38,6 +39,17 @@ def save_usage_transactions(tx_df):
                 {"year": int(row["year"]), "week": int(row["week"])},
             )
         tx_df.to_sql("usage_transactions", con=connection, if_exists="append", index=False, method="multi", chunksize=1000)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_usage_month_item():
+    """월 x 품목별 캠프 사용 수량/금액 (전체 캠프 합산, usage_facts 기준)."""
+    conn = get_db_connection()
+    return conn.query(
+        "select year, month, item_code, sum(qty) as qty, sum(amt) as amt "
+        "from usage_facts group by year, month, item_code",
+        ttl=0,
+    )
 
 
 def camp_weekly_usage_rate(usage, code, camp):

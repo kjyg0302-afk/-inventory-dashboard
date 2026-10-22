@@ -5,7 +5,8 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-from formatting import fmt_int, fmt_won, render_trend_chart
+from formatting import ACCENT, ACCENT_2, fmt_int, fmt_won, render_compare_chart, render_trend_chart
+from usage_data import load_usage_month_item
 from boxhero import (
     get_boxhero_token,
     fetch_boxhero_locations,
@@ -157,6 +158,125 @@ def render(ctx):
     st.caption("\"30일 출고\"는 저장된 박스히어로 출고 이력 기준이에요 (아래에서 새 출고분을 가져올 수 있어요).")
 
     _render_out_history(wh_items)
+    st.divider()
+    _render_out_vs_usage(wh_items)
+
+
+TOOL_PATTERN = r"\[공구\]|\[Acc\]|헬멧"
+
+
+def _render_out_vs_usage(wh_items):
+    """창고 출고(박스히어로) vs 캠프 사용(정비 원본) 비교. 단가는 거의 같아서(중앙값 비율 1.00)
+    차이는 주로 '무엇이 출고됐나'에서 나므로, 캠프 정비와 무관한 출고를 필터로 뺄 수 있게 한다."""
+    st.subheader("창고 출고 vs 캠프 사용 비교")
+    st.caption(
+        "창고 출고(박스히어로 출고 × 현재 판매가)와 캠프 실사용(정비 원본 데이터의 부품계)을 같은 기간으로 "
+        "맞춰 비교해요. 미사용 품목 정리, 캠프가 아닌 곳으로 나간 출고, 공구·악세사리는 캠프 사용 기록에 "
+        "잡히지 않아서 기본으로 빼고 봐요."
+    )
+    out = _priced_out_lines(None, wh_items)
+    use = load_usage_month_item()
+    if out.empty or use.empty:
+        st.caption("출고 이력이나 사용량 데이터가 없어서 비교할 수 없어요.")
+        return
+    out = out.assign(ym=out["time_kst"].dt.strftime("%Y-%m"), sku_u=out["sku"].fillna("").str.strip().str.upper())
+    use = use.assign(
+        ym=use["year"].astype(int).astype(str) + "-" + use["month"].astype(int).map("{:02d}".format),
+        sku_u=use["item_code"].str.strip().str.upper(),
+        qty=pd.to_numeric(use["qty"]),
+        amt=pd.to_numeric(use["amt"]),
+    )
+    cur_ym = datetime.now(KST).strftime("%Y-%m")
+    months = sorted(m for m in set(use["ym"]) & set(out["ym"]) if m < cur_ym)  # 진행 중인 이번 달 제외
+    if not months:
+        st.caption("출고와 사용 데이터가 겹치는 기간이 없어요.")
+        return
+
+    if len(months) > 1:
+        start, end = st.select_slider("비교 기간", options=months, value=(months[0], months[-1]), key="ovu_range")
+    else:
+        start = end = months[0]
+    partners = sorted(out["partner"].fillna("(없음)").unique())
+    f1, f2 = st.columns([3, 2])
+    # 정비팀(하품)은 사용 데이터에 '하드웨어품질관리팀' 캠프로 잡히므로 캠프 출고처로 같이 본다.
+    camp_partners = [p for p in partners if p.startswith("1.캠프") or "정비팀(하품)" in p]
+    sel_partners = f1.multiselect("포함할 출고처", partners, default=camp_partners, key="ovu_partners")
+    excl_unused = f2.checkbox("미사용 품목 제외", value=True, key="ovu_unused")
+    excl_tools = f2.checkbox("공구·악세사리([공구]/[Acc]/헬멧) 제외", value=True, key="ovu_tools")
+
+    name_by_sku = {str(it.get("sku") or "").strip().upper(): it.get("name") or "" for it in wh_items}
+    price_by_sku = {str(it.get("sku") or "").strip().upper(): float(it.get("price") or 0) for it in wh_items}
+
+    def keep_item(sku_series, name_series):
+        mask = pd.Series(True, index=sku_series.index)
+        names = name_series.fillna("")
+        if excl_unused:
+            mask &= ~names.str.contains("미사용")
+        if excl_tools:
+            mask &= ~names.str.contains(TOOL_PATTERN, regex=True)
+        return mask
+
+    o_all = out[(out["ym"] >= start) & (out["ym"] <= end)]
+    o = o_all[o_all["partner"].fillna("(없음)").isin(sel_partners)]
+    o = o[keep_item(o["sku_u"], o["name"])]
+    u = use[(use["ym"] >= start) & (use["ym"] <= end)]
+    # 품목 필터(미사용/공구)는 사용 쪽에도 같이 적용해야 공정하다 — 품목명은 박스히어로 기준.
+    u = u[keep_item(u["sku_u"], u["sku_u"].map(name_by_sku))]
+
+    out_amt, use_amt = o["amt"].sum(), u["amt"].sum()
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("출고 금액", fmt_won(out_amt), border=True)
+    k2.metric("사용 금액", fmt_won(use_amt), border=True)
+    k3.metric("출고 / 사용", f"{out_amt / use_amt:.2f}배" if use_amt else "-", border=True)
+    k4.metric("수량 (출고 / 사용)", f"{fmt_int(o['qty'].sum())} / {fmt_int(u['qty'].sum())}", border=True)
+    st.caption(f"필터로 뺀 출고 금액: {fmt_won(o_all['amt'].sum() - out_amt)} (같은 기간 전체 출고 {fmt_won(o_all['amt'].sum())})")
+
+    monthly = pd.concat([
+        o.groupby("ym")["amt"].sum().rename("창고 출고"),
+        u.groupby("ym")["amt"].sum().rename("캠프 사용"),
+    ], axis=1).reindex([m for m in months if start <= m <= end]).fillna(0)
+    long = monthly.reset_index(names="월").melt(id_vars="월", var_name="구분", value_name="금액")
+    st.altair_chart(
+        render_compare_chart(long, "월", "구분", "금액", {"창고 출고": ACCENT, "캠프 사용": ACCENT_2}),
+        width="stretch",
+    )
+
+    zero_price = u[(u["amt"] > 0) & (u["sku_u"].map(price_by_sku) == 0)]
+    if not zero_price.empty:
+        st.warning(
+            f"박스히어로 판매가가 0원인데 캠프 사용 금액은 있는 품목이 {zero_price['sku_u'].nunique()}개 있어요 "
+            f"(사용 금액 {fmt_won(zero_price['amt'].sum())}). 이 품목들은 출고 금액이 0으로 잡혀서 출고가 적어 보여요. "
+            "주로 호환·중고 부품이라 박스히어로에 판매가를 넣으면 정확해져요.",
+            icon=":material/warning:",
+        )
+
+    st.markdown("**품목별 비교**")
+    items = pd.concat([
+        o.groupby("sku_u").agg(출고수량=("qty", "sum"), 출고금액=("amt", "sum")),
+        u.groupby("sku_u").agg(사용수량=("qty", "sum"), 사용금액=("amt", "sum")),
+    ], axis=1).fillna(0)
+    items["금액 차이(출고-사용)"] = items["출고금액"] - items["사용금액"]
+    items["수량 차이(출고-사용)"] = items["출고수량"] - items["사용수량"]
+    items.insert(0, "품목명", items.index.map(lambda s: name_by_sku.get(s) or "-"))
+    items = items.reset_index(names="SKU").sort_values("금액 차이(출고-사용)", key=abs, ascending=False)
+    q = st.text_input("품목명 또는 SKU로 검색", "", key="ovu_search")
+    if q.strip():
+        ql = q.strip().lower()
+        items = items[items["품목명"].str.lower().str.contains(ql, regex=False) | items["SKU"].str.lower().str.contains(ql, regex=False)]
+    st.dataframe(
+        items[["SKU", "품목명", "출고수량", "사용수량", "수량 차이(출고-사용)", "출고금액", "사용금액", "금액 차이(출고-사용)"]],
+        hide_index=True,
+        column_config={
+            "출고수량": st.column_config.NumberColumn("출고 수량", format="%,d개"),
+            "사용수량": st.column_config.NumberColumn("사용 수량", format="%,d개"),
+            "수량 차이(출고-사용)": st.column_config.NumberColumn(format="%,d개"),
+            "출고금액": st.column_config.NumberColumn("출고 금액", format="₩%,d"),
+            "사용금액": st.column_config.NumberColumn("사용 금액", format="₩%,d"),
+            "금액 차이(출고-사용)": st.column_config.NumberColumn(format="₩%,d"),
+        },
+    )
+    st.caption("차이가 큰 순서예요. 출고가 계속 사용보다 많으면 캠프에 쌓이고 있거나 다른 용도로 나간 거고, "
+               "사용이 더 많으면 캠프 재고·캠프 간 이관·판매가 0원 품목 때문일 수 있어요.")
 
 
 def _render_out_history(wh_items):
