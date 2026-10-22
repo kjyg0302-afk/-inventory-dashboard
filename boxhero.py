@@ -7,6 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
+import pandas as pd
 import requests
 import streamlit as st
 from sqlalchemy import text
@@ -171,66 +172,94 @@ def _save_out_tx(rows):
             )
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def fetch_boxhero_recent_out_transactions(days=30):
-    """최근 days일 이내의 출고 트랜잭션 + 건별 품목 라인(품목별 출고량, 판매가 기준 금액).
-
-    목록 API에는 품목 정보가 없어 건마다 상세를 따로 조회해야 하는데, 출고 기록은 만들어진
-    뒤로는 거의 바뀌지 않으므로 한 번 받은 상세는 boxhero_out_tx 테이블에 저장해두고
-    (revision이 같으면) 재사용한다 — 다음부터는 새로 생긴 출고 건만 조회하면 된다.
-    금액은 지금 판매가로 매번 다시 계산한다.
-    """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+def list_out_summaries(since=None, max_pages=500):
+    """출고 목록(품목 정보 없음)을 최신순으로. since(datetime, UTC)보다 오래된 건을 만나면 멈춘다."""
     summaries = []
     params = {"type": "out", "limit": 100}
-    for _ in range(50):
+    for _ in range(max_pages):
         data = boxhero_get("/transactions", params)
         stopped = False
         for tx in data.get("items", []):
-            tx_time = datetime.fromisoformat(tx["transaction_time"].replace("Z", "+00:00"))
-            if tx_time < cutoff:
-                stopped = True
-                break
+            if since is not None:
+                tx_time = datetime.fromisoformat(tx["transaction_time"].replace("Z", "+00:00"))
+                if tx_time < since:
+                    stopped = True
+                    break
             summaries.append(tx)
         if stopped or not data.get("has_more"):
             break
         params["cursor"] = data["cursor"]
+    return summaries
 
+
+def _tx_row(tx, detail):
+    return {
+        "tx_id": tx["id"],
+        "revision": tx.get("revision"),
+        "transaction_time": tx["transaction_time"],
+        "memo": tx.get("memo"),
+        "partner": (tx.get("partner") or {}).get("name"),
+        "lines": [
+            {
+                "item_id": ln["item"]["id"],
+                "sku": ln.get("sku") or ln["item"].get("sku"),
+                "name": ln.get("name") or ln["item"].get("name"),
+                "qty": abs(ln.get("quantity", 0)),
+            }
+            for ln in detail.get("items", [])
+        ],
+    }
+
+
+def store_out_tx_details(summaries, batch=50, progress=None):
+    """아직 저장 안 됐거나 revision이 바뀐 출고 건만 상세를 받아 boxhero_out_tx에 저장.
+    batch건씩 받아서 바로 저장하므로 중간에 끊겨도 받은 만큼은 남는다. 반환: 새로 저장한 건수."""
     cached = _load_cached_out_tx([tx["id"] for tx in summaries])
     need = [tx for tx in summaries if tx["id"] not in cached or cached[tx["id"]][0] != tx.get("revision")]
     token = get_boxhero_token()
-    for start in range(0, len(need), 50):  # 50건씩 받아서 바로 저장 — 중간에 끊겨도 받은 만큼은 남는다
-        batch = need[start:start + 50]
-        details = _fetch_tx_details([tx["id"] for tx in batch], token)
-        rows = []
-        for tx in batch:
-            lines = [
-                {
-                    "item_id": ln["item"]["id"],
-                    "sku": ln.get("sku") or ln["item"].get("sku"),
-                    "name": ln.get("name") or ln["item"].get("name"),
-                    "qty": abs(ln.get("quantity", 0)),
-                }
-                for ln in details[tx["id"]].get("items", [])
-            ]
-            cached[tx["id"]] = (tx.get("revision"), lines)
-            rows.append({
-                "tx_id": tx["id"], "revision": tx.get("revision"), "transaction_time": tx["transaction_time"],
-                "memo": tx.get("memo"), "partner": (tx.get("partner") or {}).get("name"), "lines": lines,
-            })
-        _save_out_tx(rows)
+    for start in range(0, len(need), batch):
+        chunk = need[start:start + batch]
+        details = _fetch_tx_details([tx["id"] for tx in chunk], token)
+        _save_out_tx([_tx_row(tx, details[tx["id"]]) for tx in chunk])
+        if progress:
+            progress(start + len(chunk), len(need))
+    return len(need)
 
-    items_by_id = {it["id"]: it for it in fetch_boxhero_items()}
-    results = []
-    for tx in summaries:
-        lines = []
-        for ln in cached.get(tx["id"], (None, []))[1]:
-            info = items_by_id.get(ln["item_id"], {})
-            lines.append({
-                "sku": info.get("sku") or ln.get("sku"),
-                "name": info.get("name") or ln.get("name"),
-                "qty": ln["qty"],
-                "amt": ln["qty"] * float(info.get("price") or 0),
-            })
-        results.append({**tx, "amt": sum(ln["amt"] for ln in lines), "lines": lines})
-    return results
+
+def sync_boxhero_out_tx(recheck_days=7):
+    """마지막으로 저장된 출고 이후의 새 출고 건만 받아 저장 (최근 recheck_days일은 수정됐을 수
+    있어서 revision을 다시 확인). 저장된 게 하나도 없으면 전체 이력을 받는다 — 오래 걸림."""
+    conn = get_db_connection()
+    latest = conn.query("select max(transaction_time) as t from boxhero_out_tx", ttl=0).iloc[0]["t"]
+    since = None if latest is None or pd.isna(latest) else latest.to_pydatetime() - timedelta(days=recheck_days)
+    n = store_out_tx_details(list_out_summaries(since=since))
+    load_out_lines.clear()
+    return n
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_out_lines(days=None):
+    """저장된 출고 이력을 품목 라인 단위 DataFrame으로 (days=None이면 전체).
+    columns: tx_id, transaction_time, memo, partner, item_id, sku, name, qty"""
+    conn = get_db_connection()
+    if days is None:
+        df = conn.query("select tx_id, transaction_time, memo, partner, lines from boxhero_out_tx", ttl=0)
+    else:
+        df = conn.query(
+            "select tx_id, transaction_time, memo, partner, lines from boxhero_out_tx "
+            "where transaction_time >= now() - make_interval(days => :d)",
+            params={"d": int(days)},
+            ttl=0,
+        )
+    cols = ["tx_id", "transaction_time", "memo", "partner", "item_id", "sku", "name", "qty"]
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    df = df.explode("lines").dropna(subset=["lines"]).reset_index(drop=True)
+    lines = pd.json_normalize(df["lines"].tolist())
+    out = pd.concat([df.drop(columns=["lines"]), lines], axis=1)
+    return out[cols]
+
+
+def last_out_tx_time():
+    conn = get_db_connection()
+    return conn.query("select max(transaction_time) as t, count(*) as n from boxhero_out_tx", ttl=0).iloc[0]
