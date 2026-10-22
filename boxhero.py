@@ -1,11 +1,17 @@
 """박스히어로(물류창고) 연동.
 박스히어로는 캠프와는 별개인 물류창고 시스템. 재고 수량/출고 이력만 제공한다."""
 
+import json
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import requests
 import streamlit as st
+from sqlalchemy import text
+
+from db import get_db_connection
 
 BOXHERO_API_BASE = "https://rest.boxhero-app.com/v1"
 
@@ -102,19 +108,82 @@ def apply_boxhero_names_to_usage(parsed_usage, facts_df=None):
     return parsed_usage, facts_df
 
 
+_BOXHERO_MIN_GAP = 0.22  # 호출 간 최소 간격(초) — 박스히어로 제한(초당 5회) 아래로 유지
+
+
+def _fetch_tx_details(tx_ids, token, workers=6):
+    """출고 건 상세를 여러 개 동시에 조회한다. 건당 응답이 1~2초라 하나씩 하면 너무 느려서
+    (30일 400건 기준 10분) 동시에 요청하되, 전체 호출 간격은 제한 아래로 맞춘다."""
+    lock = threading.Lock()
+    last_call = [0.0]
+
+    def get(tx_id):
+        for attempt in range(4):
+            with lock:
+                wait = last_call[0] + _BOXHERO_MIN_GAP - time.monotonic()
+                if wait > 0:
+                    time.sleep(wait)
+                last_call[0] = time.monotonic()
+            resp = requests.get(
+                f"{BOXHERO_API_BASE}/transactions/{tx_id}",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=20,
+            )
+            if resp.status_code == 429:  # 제한에 걸리면 잠깐 쉬었다가 다시
+                time.sleep(1 + attempt)
+                continue
+            resp.raise_for_status()
+            return tx_id, resp.json()["item"]
+        resp.raise_for_status()
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return dict(ex.map(get, tx_ids))
+
+
+def _load_cached_out_tx(tx_ids):
+    """DB에 저장해둔 출고 건 상세 {tx_id: (revision, lines)}."""
+    if not tx_ids:
+        return {}
+    conn = get_db_connection()
+    df = conn.query(
+        "select tx_id, revision, lines from boxhero_out_tx where tx_id = any(:ids)",
+        params={"ids": list(tx_ids)},
+        ttl=0,
+    )
+    return {int(r.tx_id): (r.revision, r.lines) for r in df.itertuples()}
+
+
+def _save_out_tx(rows):
+    conn = get_db_connection()
+    engine = conn.session.get_bind()
+    with engine.begin() as c:
+        for row in rows:
+            c.execute(
+                text(
+                    """
+                    insert into boxhero_out_tx (tx_id, revision, transaction_time, memo, partner, lines)
+                    values (:tx_id, :revision, :transaction_time, :memo, :partner, CAST(:lines AS jsonb))
+                    on conflict (tx_id) do update set revision = excluded.revision, memo = excluded.memo,
+                        partner = excluded.partner, lines = excluded.lines, fetched_at = now()
+                    """
+                ),
+                {**row, "lines": json.dumps(row["lines"], ensure_ascii=False)},
+            )
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_boxhero_recent_out_transactions(days=30):
-    """최근 days일 이내의 출고 트랜잭션을 가져온다 (최신순이라 기간을 벗어나면 즉시 중단).
+    """최근 days일 이내의 출고 트랜잭션 + 건별 품목 라인(품목별 출고량, 판매가 기준 금액).
 
-    목록 API는 품목별 상세가 없어, 건별로 상세를 한 번씩 더 호출해 판매가 기준
-    출고 금액(amt)을 계산해 붙인다. 건수가 많으면 다소 시간이 걸릴 수 있다.
+    목록 API에는 품목 정보가 없어 건마다 상세를 따로 조회해야 하는데, 출고 기록은 만들어진
+    뒤로는 거의 바뀌지 않으므로 한 번 받은 상세는 boxhero_out_tx 테이블에 저장해두고
+    (revision이 같으면) 재사용한다 — 다음부터는 새로 생긴 출고 건만 조회하면 된다.
+    금액은 지금 판매가로 매번 다시 계산한다.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     summaries = []
     params = {"type": "out", "limit": 100}
-    for i in range(50):
-        if i > 0:
-            time.sleep(0.25)
+    for _ in range(50):
         data = boxhero_get("/transactions", params)
         stopped = False
         for tx in data.get("items", []):
@@ -127,16 +196,41 @@ def fetch_boxhero_recent_out_transactions(days=30):
             break
         params["cursor"] = data["cursor"]
 
-    price_by_id = {it["id"]: float(it.get("price") or 0) for it in fetch_boxhero_items()}
+    cached = _load_cached_out_tx([tx["id"] for tx in summaries])
+    need = [tx for tx in summaries if tx["id"] not in cached or cached[tx["id"]][0] != tx.get("revision")]
+    token = get_boxhero_token()
+    for start in range(0, len(need), 50):  # 50건씩 받아서 바로 저장 — 중간에 끊겨도 받은 만큼은 남는다
+        batch = need[start:start + 50]
+        details = _fetch_tx_details([tx["id"] for tx in batch], token)
+        rows = []
+        for tx in batch:
+            lines = [
+                {
+                    "item_id": ln["item"]["id"],
+                    "sku": ln.get("sku") or ln["item"].get("sku"),
+                    "name": ln.get("name") or ln["item"].get("name"),
+                    "qty": abs(ln.get("quantity", 0)),
+                }
+                for ln in details[tx["id"]].get("items", [])
+            ]
+            cached[tx["id"]] = (tx.get("revision"), lines)
+            rows.append({
+                "tx_id": tx["id"], "revision": tx.get("revision"), "transaction_time": tx["transaction_time"],
+                "memo": tx.get("memo"), "partner": (tx.get("partner") or {}).get("name"), "lines": lines,
+            })
+        _save_out_tx(rows)
 
+    items_by_id = {it["id"]: it for it in fetch_boxhero_items()}
     results = []
-    for i, tx in enumerate(summaries):
-        if i > 0:
-            time.sleep(0.2)
-        detail = boxhero_get(f"/transactions/{tx['id']}")["item"]
-        amt = sum(
-            abs(line.get("quantity", 0)) * price_by_id.get(line["item"]["id"], 0)
-            for line in detail.get("items", [])
-        )
-        results.append({**tx, "amt": amt})
+    for tx in summaries:
+        lines = []
+        for ln in cached.get(tx["id"], (None, []))[1]:
+            info = items_by_id.get(ln["item_id"], {})
+            lines.append({
+                "sku": info.get("sku") or ln.get("sku"),
+                "name": info.get("name") or ln.get("name"),
+                "qty": ln["qty"],
+                "amt": ln["qty"] * float(info.get("price") or 0),
+            })
+        results.append({**tx, "amt": sum(ln["amt"] for ln in lines), "lines": lines})
     return results

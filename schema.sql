@@ -66,6 +66,22 @@ update transfer_requests set requested_qty = qty where requested_qty is null;
 create index if not exists idx_transfer_requests_item on transfer_requests (item_code);
 create index if not exists idx_transfer_requests_status on transfer_requests (status);
 
+-- 박스히어로 출고 건별 품목 라인 캐시. 출고 목록 API에는 품목 정보가 없어 건마다 상세를 따로
+-- 조회해야 하는데(건당 1~2초), 출고 기록은 거의 바뀌지 않으므로 한 번 받은 상세를 저장해두고
+-- revision이 같으면 재사용한다. lines: [{"item_id", "sku", "name", "qty"}] (금액은 표시할 때
+-- 현재 판매가로 계산). memo에는 보통 받는 캠프명이 적혀 있다.
+create table if not exists boxhero_out_tx (
+    tx_id bigint primary key,
+    revision integer,
+    transaction_time timestamptz not null,
+    memo text,
+    partner text,
+    lines jsonb not null,
+    fetched_at timestamptz not null default now()
+);
+
+create index if not exists idx_boxhero_out_tx_time on boxhero_out_tx (transaction_time);
+
 -- 박스히어로 물류창고 재고 스냅샷 (일별 1건). 박스히어로 API는 현재 시점 재고만 주기 때문에,
 -- 창고 현황 탭을 열 때마다 그날의 스냅샷을 기록해 월별 추이를 쌓아나간다.
 create table if not exists warehouse_snapshots (
