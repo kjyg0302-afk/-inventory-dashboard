@@ -40,12 +40,14 @@ def _render_reject_analysis(data):
 
     st.markdown("**캠프별 승인·거절 현황**")
     stats = camp_decision_stats(load_decided_requests()).sort_values(
-        ["거절 횟수", "승인 횟수"], ascending=False, na_position="last"
+        ["요청받은 횟수", "요청 횟수"], ascending=False
     )
     st.dataframe(
         stats,
         hide_index=True,
         column_config={
+            "요청받은 횟수": st.column_config.NumberColumn(format="%d건"),
+            "요청 횟수": st.column_config.NumberColumn(format="%d건"),
             "승인 횟수": st.column_config.NumberColumn(format="%d건"),
             "거절 횟수": st.column_config.NumberColumn(format="%d건"),
             "승인율(%)": st.column_config.ProgressColumn("승인율", format="%.1f%%", min_value=0, max_value=100),
@@ -55,7 +57,8 @@ def _render_reject_analysis(data):
         },
     )
     st.caption(
-        "승인·거절·승인율은 요청을 받은(보내는) 캠프 기준, 승인받은·거절당한·승인받은 비율은 요청한 캠프 기준이에요. "
+        "요청받은 횟수(= 승인 + 거절)·승인율은 요청을 받은(보내는) 캠프 기준, "
+        "요청 횟수(= 승인받은 + 거절당한)·승인받은 비율은 요청한 캠프 기준이에요. "
         "아직 처리 전인 요청중 건은 빼고 계산해요. 승인은 이동중·입고완료를 모두 포함해요."
     )
 

@@ -74,7 +74,11 @@ def camp_decision_stats(decided):
     out = sent.join(asked, how="outer")
     counts = ["승인 횟수", "거절 횟수", "승인받은 횟수", "거절당한 횟수"]
     out[counts] = out[counts].fillna(0).astype(int)  # 한쪽에만 등장한 캠프는 0건 (비율은 빈칸으로 둠)
-    return out.reset_index(names="캠프")
+    out["요청받은 횟수"] = out["승인 횟수"] + out["거절 횟수"]
+    out["요청 횟수"] = out["승인받은 횟수"] + out["거절당한 횟수"]
+    cols = ["요청받은 횟수", "승인 횟수", "거절 횟수", "승인율(%)",
+            "요청 횟수", "승인받은 횟수", "거절당한 횟수", "승인받은 비율(%)"]
+    return out[cols].reset_index(names="캠프")
 
 
 @st.cache_data(ttl=600, show_spinner=False)
