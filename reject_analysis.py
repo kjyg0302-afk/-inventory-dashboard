@@ -48,6 +48,35 @@ def load_rejections():
     )
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def load_decided_requests():
+    """처리가 끝난(승인=이동중·입고완료, 또는 거절) 이관 요청의 보낸/받는 캠프와 결과."""
+    conn = get_db_connection()
+    df = conn.query(
+        "select from_camp, to_camp, status from transfer_requests "
+        "where status in ('in_transit', 'completed', 'rejected')",
+        ttl=0,
+    )
+    df["approved"] = df["status"] != "rejected"
+    return df
+
+
+def camp_decision_stats(decided):
+    """캠프별 승인/거절 집계. 요청을 받은 쪽(보내는 캠프) 기준과 요청한 쪽 기준을 같이 낸다."""
+    def agg(col, ok_label, no_label, rate_label):
+        g = decided.groupby(col)["approved"].agg(["sum", "count"])
+        out = pd.DataFrame({ok_label: g["sum"].astype(int), no_label: (g["count"] - g["sum"]).astype(int)})
+        out[rate_label] = (g["sum"] / g["count"] * 100).round(1)
+        return out
+
+    sent = agg("from_camp", "승인 횟수", "거절 횟수", "승인율(%)")
+    asked = agg("to_camp", "승인받은 횟수", "거절당한 횟수", "승인받은 비율(%)")
+    out = sent.join(asked, how="outer")
+    counts = ["승인 횟수", "거절 횟수", "승인받은 횟수", "거절당한 횟수"]
+    out[counts] = out[counts].fillna(0).astype(int)  # 한쪽에만 등장한 캠프는 0건 (비율은 빈칸으로 둠)
+    return out.reset_index(names="캠프")
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def load_weekly_usage(camps, codes):
     """(캠프, 품목코드 대문자, 주 시작일)별 사용 수량. camps/codes는 캐시 키가 되도록 tuple."""

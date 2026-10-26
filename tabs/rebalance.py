@@ -14,7 +14,14 @@ from formatting import (
     render_group_bars,
     render_trend_chart,
 )
-from reject_analysis import BEFORE_WEEKS, build_tracking, load_rejections, week_start_of
+from reject_analysis import (
+    BEFORE_WEEKS,
+    build_tracking,
+    camp_decision_stats,
+    load_decided_requests,
+    load_rejections,
+    week_start_of,
+)
 from usage_calc import get_usage_for_code
 from transfers import (
     list_all_transfer_requests,
@@ -31,13 +38,26 @@ def _render_reject_analysis(data):
         st.caption("아직 거절된 이관 요청이 없어요.")
         return
 
-    st.markdown("**캠프별 거절 현황**")
-    by_camp = pd.concat([
-        rej["from_camp"].value_counts().rename("거절한 횟수"),
-        rej["to_camp"].value_counts().rename("거절당한 횟수"),
-    ], axis=1).fillna(0).astype(int)
-    by_camp = by_camp.reset_index(names="캠프").sort_values(["거절한 횟수", "거절당한 횟수"], ascending=False)
-    st.dataframe(by_camp, hide_index=True)
+    st.markdown("**캠프별 승인·거절 현황**")
+    stats = camp_decision_stats(load_decided_requests()).sort_values(
+        ["거절 횟수", "승인 횟수"], ascending=False, na_position="last"
+    )
+    st.dataframe(
+        stats,
+        hide_index=True,
+        column_config={
+            "승인 횟수": st.column_config.NumberColumn(format="%d건"),
+            "거절 횟수": st.column_config.NumberColumn(format="%d건"),
+            "승인율(%)": st.column_config.ProgressColumn("승인율", format="%.1f%%", min_value=0, max_value=100),
+            "승인받은 횟수": st.column_config.NumberColumn(format="%d건"),
+            "거절당한 횟수": st.column_config.NumberColumn(format="%d건"),
+            "승인받은 비율(%)": st.column_config.ProgressColumn("승인받은 비율", format="%.1f%%", min_value=0, max_value=100),
+        },
+    )
+    st.caption(
+        "승인·거절·승인율은 요청을 받은(보내는) 캠프 기준, 승인받은·거절당한·승인받은 비율은 요청한 캠프 기준이에요. "
+        "아직 처리 전인 요청중 건은 빼고 계산해요. 승인은 이동중·입고완료를 모두 포함해요."
+    )
 
     stock = {}
     for it in data["items"]:
