@@ -211,8 +211,9 @@ def render(ctx):
                     for _, r in all_in_transit.iterrows():
                         render_in_transit_request_row(r, data, admin_tr_name, key_prefix="all_", allow_revert=True)
 
-    if auth["role"] == "admin":
-        with st.expander("📉 거절 분석 (관리자 전용)", icon=":material/insights:"):
+    # 거절 분석은 조회 전용이라 물류팀(물류창고 로그인)에도 보여준다.
+    if auth["role"] == "admin" or my_login_camp == "물류창고":
+        with st.expander("📉 거절 분석 (관리자·물류팀)", icon=":material/insights:"):
             _render_reject_analysis(data)
 
     if my_login_camp:
