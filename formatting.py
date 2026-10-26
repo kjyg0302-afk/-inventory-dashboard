@@ -1,6 +1,6 @@
 """숫자 포맷 및 차트 렌더링 공용 유틸리티."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import altair as alt
 import pandas as pd
@@ -23,6 +23,23 @@ def monthly_mean_excluding_current(monthly_series):
     current_month = datetime.now().strftime("%Y-%m")
     completed = monthly_series.drop(index=current_month, errors="ignore")
     return completed.mean() if not completed.empty else monthly_series.mean()
+
+
+def _jan1_offset(year):
+    return (date(year, 1, 1).weekday() + 1) % 7  # 1월 1일이 일요일이면 0
+
+
+def weeknum(d):
+    """사용량 데이터의 해당주 — 일요일 시작 주차 (엑셀 WEEKNUM(d, 1)과 같음, 예: 2025-06-01(일) = 23주)."""
+    return (d.timetuple().tm_yday - 1 + _jan1_offset(d.year)) // 7 + 1
+
+
+def week_start(year, week):
+    return date(year, 1, 1) - timedelta(days=_jan1_offset(year)) + timedelta(weeks=week - 1)
+
+
+def week_start_of(d):
+    return d - timedelta(days=(d.weekday() + 1) % 7)
 
 
 def _to_kst(ts):

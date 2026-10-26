@@ -16,8 +16,6 @@ from formatting import fmt_request_timeline, fmt_transfer_qty
 from parsing import (
     parse_inventory_excel,
     parse_usage_excel,
-    parse_usage_excel_raw,
-    parse_usage_transactions_raw,
 )
 from tableau import get_tableau_config, fetch_tableau_inventory
 from auth import (
@@ -53,7 +51,7 @@ from transfers import (
     list_my_requested_awaiting_approval,
     list_my_recently_rejected,
 )
-from usage_data import save_usage_facts, save_usage_transactions
+from usage_data import ingest_raw_usage, refresh_usage_summary, save_usage_facts
 from app_data import (
     load_data,
     save_data,
@@ -244,33 +242,46 @@ with col_upload2:
     )
     if usage_file is not None and st.session_state.get("_usage_file_id") != usage_file.file_id:
         try:
+            report = None
             with st.spinner("사용량 데이터를 처리하는 중이에요... (대용량 엑셀은 시간이 걸릴 수 있어요)"):
                 if usage_file.name.lower().endswith(".json"):
                     parsed_usage = json.load(usage_file)
                     if "items" not in parsed_usage:
                         raise ValueError("사용량 JSON 형식이 올바르지 않습니다.")
                     parsed_usage, _ = apply_boxhero_names_to_usage(parsed_usage)
+                    backup_data_before_overwrite("usage", "사용량 데이터 업로드")
+                    save_data("usage", parsed_usage)
                 else:
                     preview_cols = set(pd.read_excel(usage_file, nrows=0).columns)
                     usage_file.seek(0)
-                    is_raw_format = {"상태", "수량", "부품계"} <= preview_cols
-                    if is_raw_format:
-                        parsed_usage = parse_usage_excel_raw(usage_file)
+                    if {"상태", "수량", "부품계"} <= preview_cols:
+                        # 정비 원본: 날짜 단위로 로우데이터 교체 → 주간 합계·요약 재계산
+                        uploader = (st.session_state.get("auth") or {}).get("camp") or "관리자"
+                        report = ingest_raw_usage(usage_file, usage_file.name, uploader, usage_file.size)
+                        parsed_usage = report["summary"]
                     else:
-                        parsed_usage = parse_usage_excel(usage_file)
-                    facts_df = parsed_usage.pop("facts")
-                    parsed_usage, facts_df = apply_boxhero_names_to_usage(parsed_usage, facts_df)
-                    save_usage_facts(facts_df)
-                    if is_raw_format:
-                        usage_file.seek(0)
-                        tx_df = parse_usage_transactions_raw(usage_file)
-                        save_usage_transactions(tx_df)
-                backup_data_before_overwrite("usage", "사용량 데이터 업로드")
-                save_data("usage", parsed_usage)
+                        # 예전 태블로 피벗 양식: 주 단위 합계만 교체하고 요약은 DB 전체로 재계산
+                        facts_df = parse_usage_excel(usage_file).pop("facts")
+                        _, facts_df = apply_boxhero_names_to_usage({}, facts_df)
+                        save_usage_facts(facts_df)
+                        parsed_usage = refresh_usage_summary("사용량 데이터 업로드 (태블로 양식)")
             st.session_state.usage = parsed_usage
             usage = parsed_usage
             st.session_state["_usage_file_id"] = usage_file.file_id
-            st.success(f"사용량 갱신 완료 · 부품 {len(parsed_usage['items']):,}종", icon=":material/check_circle:")
+            if report:
+                st.success(
+                    f"사용량 반영 완료 · 정비완료 {report['date_min']} ~ {report['date_max']} · "
+                    f"{report['dates_replaced']}일치 {report['rows_saved']:,}행 교체",
+                    icon=":material/check_circle:",
+                )
+                if report["skipped"]:
+                    st.warning(
+                        "기존보다 건수가 크게 적어서 교체하지 않은 날짜: "
+                        + ", ".join(f"{s['date']}({s['new']}건, 기존 {s['existing']}건)" for s in report["skipped"]),
+                        icon=":material/warning:",
+                    )
+            else:
+                st.success(f"사용량 갱신 완료 · 부품 {len(parsed_usage['items']):,}종", icon=":material/check_circle:")
         except Exception as e:
             st.error(f"사용량 파일을 읽는 중 문제가 발생했습니다: {e}", icon=":material/error:")
 

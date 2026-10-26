@@ -231,6 +231,22 @@ create index if not exists idx_usage_transactions_camp on usage_transactions (ca
 create index if not exists idx_usage_transactions_device on usage_transactions (device_no);
 create index if not exists idx_usage_transactions_year_week on usage_transactions (year, week);
 
+-- 사용량 원본 엑셀 반영 기록. 어떤 파일을 언제 반영했고 어느 정비완료 날짜를 교체했는지 남겨서,
+-- 사용량데이터 폴더에 새로 추가된 파일만 골라 반영하는 데 쓴다. skipped: 기존보다 건수가 크게
+-- 적어서 교체하지 않은 날짜 [{"date", "new", "existing"}].
+create table if not exists usage_ingest_log (
+    id bigserial primary key,
+    file_name text not null,
+    file_size bigint,
+    date_min date,
+    date_max date,
+    rows_saved integer,
+    dates_replaced integer,
+    skipped jsonb,
+    ingested_by text,
+    ingested_at timestamptz not null default now()
+);
+
 -- 거래처(공급업체) 마스터. 내자(국내)/외자(해외) 구분만 두고, 담당자 연락처는 참고용 메모.
 create table if not exists vendors (
     id bigserial primary key,

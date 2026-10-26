@@ -1,12 +1,16 @@
 """usage_facts 테이블(로우 단위 사용량 사실 테이블) 기반 집계/조회 함수들."""
 
+import json
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
 from sqlalchemy import text
 
+from app_data import backup_data_before_overwrite, save_data
+from boxhero import apply_boxhero_names_to_usage, get_boxhero_name_map
 from db import get_db_connection
+from parsing import parse_usage_transactions_raw, summarize_usage_facts
 from usage_calc import get_usage_for_code
 
 
@@ -26,19 +30,113 @@ def save_usage_facts(facts_df):
         facts_df.to_sql("usage_facts", con=connection, if_exists="append", index=False, method="multi", chunksize=1000)
 
 
-def save_usage_transactions(tx_df):
-    """usage_transactions 테이블에서 tx_df에 들어있는 (year, week) 조합만 지우고 다시 채운다
-    (save_usage_facts와 동일한 주차 단위 교체 방식)."""
+REPLACE_MIN_RATIO = 0.8
+
+
+def refresh_usage_summary(reason):
+    """usage_facts 전체로 사용량 요약(app_data 'usage')을 다시 계산해 저장하고 반환한다."""
     conn = get_db_connection()
+    facts = conn.query(
+        "select camp, item_code, item_name, year, month, week, qty, amt from usage_facts", ttl=0
+    )
+    summary, _ = apply_boxhero_names_to_usage(summarize_usage_facts(facts))
+    backup_data_before_overwrite("usage", reason)
+    save_data("usage", summary)
+    return summary
+
+
+def _rebuild_facts_weeks(connection, weeks):
+    """usage_transactions(건별 로우)에서 해당 주들의 usage_facts(주간 합계)를 다시 만든다."""
+    name_map = get_boxhero_name_map()
+    for year, week in sorted(weeks):
+        connection.execute(
+            text("delete from usage_facts where year = :y and week = :w"), {"y": int(year), "w": int(week)}
+        )
+        agg = pd.read_sql(
+            text(
+                "select year, month, week, camp, item_code, sum(qty) as qty, sum(amt) as amt "
+                "from usage_transactions where year = :y and week = :w "
+                "group by year, month, week, camp, item_code"
+            ),
+            connection,
+            params={"y": int(year), "w": int(week)},
+        )
+        if agg.empty:
+            continue
+        agg["item_name"] = agg["item_code"].str.strip().str.upper().map(name_map)
+        agg.to_sql("usage_facts", con=connection, if_exists="append", index=False, method="multi", chunksize=1000)
+
+
+def ingest_raw_usage(file, file_name, ingested_by, file_size=None, dry_run=False):
+    """정비 원본 엑셀 한 개를 반영한다.
+
+    파일에 들어있는 정비완료 '날짜' 단위로 건별 로우를 갈아끼운다 — 주 단위로 지우면 주 중간에서
+    끝나는 파일 때문에 다른 날짜 데이터가 사라지므로. 단, 이미 저장된 그 날짜 건수보다 새 파일
+    건수가 크게 적으면(REPLACE_MIN_RATIO 미만) 몇 건만 섞여 들어온 날짜로 보고 건드리지 않는다.
+    그다음 바뀐 주의 주간 합계를 다시 만들고, 사용량 요약은 DB 전체로 다시 계산한다."""
+    tx = parse_usage_transactions_raw(file)
+    no_date = int(tx["service_date"].isna().sum())
+    tx = tx[tx["service_date"].notna()]
+    if tx.empty:
+        raise ValueError("정비완료 날짜가 있는 사용 데이터가 없어요.")
+
+    conn = get_db_connection()
+    new_counts = tx.groupby("service_date").size()
+    existing = conn.query(
+        "select service_date, count(*) as n from usage_transactions where service_date = any(:ds) group by service_date",
+        params={"ds": list(new_counts.index)},
+        ttl=0,
+    )
+    old_counts = dict(zip(existing["service_date"], existing["n"]))
+    replace_dates, skipped = [], []
+    for d, n in new_counts.items():
+        old = int(old_counts.get(d, 0))
+        if old == 0 or n >= REPLACE_MIN_RATIO * old:
+            replace_dates.append(d)
+        else:
+            skipped.append({"date": str(d), "new": int(n), "existing": old})
+
+    tx_r = tx[tx["service_date"].isin(replace_dates)]
+    weeks = set(zip(tx_r["year"].astype(int), tx_r["week"].astype(int)))
+    report = {
+        "date_min": min(new_counts.index),
+        "date_max": max(new_counts.index),
+        "rows_saved": len(tx_r),
+        "rows_replaced_existing": int(sum(old_counts.get(d, 0) for d in replace_dates)),
+        "dates_replaced": len(replace_dates),
+        "weeks": sorted(weeks),
+        "skipped": skipped,
+        "no_date_rows": no_date,
+    }
+    if dry_run:
+        return report
     engine = conn.session.get_bind()
-    weeks = tx_df[["year", "week"]].drop_duplicates()
-    with engine.begin() as connection:
-        for _, row in weeks.iterrows():
-            connection.execute(
-                text("delete from usage_transactions where year = :year and week = :week"),
-                {"year": int(row["year"]), "week": int(row["week"])},
-            )
-        tx_df.to_sql("usage_transactions", con=connection, if_exists="append", index=False, method="multi", chunksize=1000)
+    with engine.begin() as c:
+        if replace_dates:
+            c.execute(text("delete from usage_transactions where service_date = any(:ds)"), {"ds": replace_dates})
+            tx_r.to_sql("usage_transactions", con=c, if_exists="append", index=False, method="multi", chunksize=1000)
+            _rebuild_facts_weeks(c, weeks)
+        c.execute(
+            text(
+                """
+                insert into usage_ingest_log
+                    (file_name, file_size, date_min, date_max, rows_saved, dates_replaced, skipped, ingested_by)
+                values (:f, :s, :dmin, :dmax, :rows, :nd, CAST(:skipped AS jsonb), :by)
+                """
+            ),
+            {
+                "f": file_name, "s": file_size, "dmin": min(new_counts.index), "dmax": max(new_counts.index),
+                "rows": len(tx_r), "nd": len(replace_dates), "skipped": json.dumps(skipped), "by": ingested_by,
+            },
+        )
+
+    report["summary"] = refresh_usage_summary(f"사용량 원본 반영: {file_name}")
+    return report
+
+
+def list_ingested_files():
+    conn = get_db_connection()
+    return conn.query("select * from usage_ingest_log order by ingested_at desc", ttl=0)
 
 
 @st.cache_data(ttl=600, show_spinner=False)

@@ -4,6 +4,8 @@ from datetime import datetime
 
 import pandas as pd
 
+from formatting import weeknum
+
 # 사용량 엑셀의 캠프명과 재고 엑셀의 캠프명이 다르게 기록된 경우 합쳐주는 규칙.
 # (export_weekly_usage.py의 CAMP_NAME_MAP과 동일하게 유지)
 USAGE_CAMP_NAME_MAP = {
@@ -167,24 +169,37 @@ def _aggregate_usage_df(df: pd.DataFrame) -> dict:
     }
 
 
-_RAW_USAGE_BASE_COLS = ["상태", "고객명", "부품번호", "수량", "부품계", "년도", "월", "해당주"]
+_RAW_USAGE_REQUIRED = ["상태", "고객명", "부품번호", "수량", "부품계"]
+_RAW_DATE_COLS = ["년도", "월", "해당주"]
 
 
 def _load_clean_usage_rows(file, extra_cols=()) -> pd.DataFrame:
     """정비 내역 원본 엑셀(건별 로우 — 정비 1건의 부품 1종이 한 행)을 읽어, 사용량 집계에
-    필요한 정리(부품번호/상태 필터, 년도/월/해당주 정제, 고객명 정리)까지 끝낸 df를 반환.
-    parse_usage_excel_raw(집계용)와 parse_usage_transactions_raw(로우데이터 보관용)가 공유."""
-    cols = list(dict.fromkeys(_RAW_USAGE_BASE_COLS + list(extra_cols)))
-    try:
-        df = pd.read_excel(file, usecols=cols, engine="calamine")
-    except Exception:
-        df = pd.read_excel(file, usecols=cols, engine="openpyxl")
+    필요한 정리(부품번호/상태 필터, 년도/월/해당주, 고객명 정리)까지 끝낸 df를 반환.
 
-    missing = set(cols) - set(df.columns)
+    년도/월/해당주는 정비완료일에서 직접 계산한다 (해당주 = 일요일 시작 주차). 예전 통합 파일은
+    이 세 열을 정비완료일 수식으로 따로 넣어 썼지만, 캠프별 원본 추출 파일에는 없기 때문.
+    정비완료 열이 없는 파일만 기존 세 열을 그대로 쓴다."""
+    wanted = set(_RAW_USAGE_REQUIRED + _RAW_DATE_COLS + ["정비완료"] + list(extra_cols))
+    try:
+        df = pd.read_excel(file, usecols=lambda c: c in wanted, engine="calamine")
+    except Exception:
+        if hasattr(file, "seek"):
+            file.seek(0)
+        df = pd.read_excel(file, usecols=lambda c: c in wanted, engine="openpyxl")
+
+    missing = [c for c in _RAW_USAGE_REQUIRED + list(extra_cols) if c not in df.columns]
     if missing:
         raise ValueError(
             f"원본 정비 내역 엑셀 형식이 올바르지 않습니다. 다음 컬럼이 없습니다: {', '.join(missing)}"
         )
+    if "정비완료" in df.columns:
+        done = pd.to_datetime(df["정비완료"], errors="coerce")
+        df["년도"] = done.dt.year
+        df["월"] = done.dt.month
+        df["해당주"] = [weeknum(d.date()) if pd.notna(d) else None for d in done]
+    elif not all(c in df.columns for c in _RAW_DATE_COLS):
+        raise ValueError("정비완료 열(또는 년도·월·해당주 열)이 있어야 주차를 계산할 수 있어요.")
 
     # 부품번호가 없는 행(공임 등 재고와 무관한 항목)은 제외
     df = df[df["부품번호"].notna() & (df["부품번호"].astype(str).str.strip() != "")].copy()
@@ -219,11 +234,21 @@ def _load_clean_usage_rows(file, extra_cols=()) -> pd.DataFrame:
     return df
 
 
-def parse_usage_excel_raw(file) -> dict:
-    """정비 내역 원본 엑셀을 읽어 usage.json과 같은 구조(부품x캠프x연도x월x주 합계)로 집계."""
-    df = _load_clean_usage_rows(file)
-    df = df.rename(columns={"수량": "합계 : 수량", "부품계": "합계 : 부품계"})
-    return _aggregate_usage_df(df)
+def summarize_usage_facts(facts):
+    """usage_facts 전체(camp, item_code, item_name, year, month, week, qty, amt)로 usage.json 요약을
+    다시 만든다. 파일 하나로 요약을 만들면 일부 기간만 담긴 파일을 올렸을 때 요약 전체가 그 기간으로
+    덮어써지므로, 요약은 항상 DB에 쌓인 전체 데이터로 계산한다."""
+    df = facts.rename(columns={
+        "camp": "고객명", "item_code": "부품번호", "item_name": "부품", "year": "년도", "month": "월",
+        "week": "해당주", "qty": "합계 : 수량", "amt": "합계 : 부품계",
+    })
+    for c in ["년도", "월", "해당주"]:
+        df[c] = df[c].astype(int)
+    for c in ["합계 : 수량", "합계 : 부품계"]:
+        df[c] = pd.to_numeric(df[c]).fillna(0)
+    summary = _aggregate_usage_df(df)
+    summary.pop("facts", None)
+    return summary
 
 
 def parse_usage_transactions_raw(file) -> pd.DataFrame:

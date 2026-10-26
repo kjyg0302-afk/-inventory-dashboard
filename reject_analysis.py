@@ -4,35 +4,17 @@
 따라가고, 비교용으로 거절 전 8주 주평균과 현재 보유 재고를 같이 본다 — 재고는 있는데 안 쓰면서
 거절했다면 재고를 쥐고 있는 것.
 
-사용량 주차(해당주)는 일요일 시작 주차(엑셀 WEEKNUM 기본)라서 날짜에서 바로 계산한다
-(예: 2025-06-01(일) = 2025년 23주)."""
+사용량 주차(해당주)는 일요일 시작 주차라서 날짜에서 바로 계산한다 (formatting.weeknum)."""
 
-from datetime import date, timedelta
+from datetime import timedelta
 
 import pandas as pd
 import streamlit as st
 
 from db import get_db_connection
-from formatting import KST
+from formatting import KST, week_start, week_start_of
 
 BEFORE_WEEKS = 8
-
-
-def _jan1_offset(year):
-    return (date(year, 1, 1).weekday() + 1) % 7  # 1월 1일이 일요일이면 0
-
-
-def weeknum(d):
-    """일요일 시작 주차 (엑셀 WEEKNUM(d, 1)과 같음)."""
-    return (d.timetuple().tm_yday - 1 + _jan1_offset(d.year)) // 7 + 1
-
-
-def week_start(year, week):
-    return date(year, 1, 1) - timedelta(days=_jan1_offset(year)) + timedelta(weeks=week - 1)
-
-
-def week_start_of(d):
-    return d - timedelta(days=(d.weekday() + 1) % 7)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
