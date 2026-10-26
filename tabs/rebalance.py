@@ -1,9 +1,20 @@
 """재고이관(캠프<>캠프) 탭."""
 
+from datetime import timedelta
+
 import pandas as pd
 import streamlit as st
 
-from formatting import fmt_int, fmt_request_timeline, fmt_transfer_qty, render_trend_chart
+from formatting import (
+    ACCENT_2,
+    CHART_MUTED,
+    fmt_int,
+    fmt_request_timeline,
+    fmt_transfer_qty,
+    render_group_bars,
+    render_trend_chart,
+)
+from reject_analysis import BEFORE_WEEKS, build_tracking, load_rejections, week_start_of
 from usage_calc import get_usage_for_code
 from transfers import (
     list_all_transfer_requests,
@@ -12,6 +23,74 @@ from transfers import (
     create_transfer_request,
 )
 from rendering import render_pending_request_row, render_in_transit_request_row
+
+
+def _render_reject_analysis(data):
+    rej = load_rejections()
+    if rej.empty:
+        st.caption("아직 거절된 이관 요청이 없어요.")
+        return
+
+    st.markdown("**캠프별 거절 현황**")
+    by_camp = pd.concat([
+        rej["from_camp"].value_counts().rename("거절한 횟수"),
+        rej["to_camp"].value_counts().rename("거절당한 횟수"),
+    ], axis=1).fillna(0).astype(int)
+    by_camp = by_camp.reset_index(names="캠프").sort_values(["거절한 횟수", "거절당한 횟수"], ascending=False)
+    st.dataframe(by_camp, hide_index=True)
+
+    stock = {}
+    for it in data["items"]:
+        code = str(it["c"]).strip().upper()
+        for camp, (q, _a) in it.get("x", {}).items():
+            stock[(camp, code)] = q
+    track, weekly, last_wk = build_tracking(rej, lambda camp, code: stock.get((camp, code), 0))
+
+    st.markdown("**거절 품목 사용량 추적 (거절한 캠프 기준)**")
+    if last_wk is not None:
+        st.caption(
+            f"사용량 데이터는 {last_wk:%Y-%m-%d} 시작 주까지 있어요. 이후 주는 사용량 엑셀을 올리면 채워져요. "
+            f"거절 전 주평균은 최초 거절일 직전 {BEFORE_WEEKS}주 기준이에요."
+        )
+    track = track.sort_values(["거절 횟수", "거절 수량"], ascending=False)
+    st.dataframe(
+        track,
+        hide_index=True,
+        column_config={
+            "거절 수량": st.column_config.NumberColumn(format="%,d개"),
+            "현재 보유": st.column_config.NumberColumn(format="%,d개"),
+            "거절 전 주평균": st.column_config.NumberColumn(format="%.1f개/주"),
+            "거절 후 주평균": st.column_config.NumberColumn(format="%.1f개/주"),
+            "거절 후 누적 사용": st.column_config.NumberColumn(format="%,d개"),
+        },
+    )
+    st.caption(
+        "\"거절 후 데이터 주수\"가 0이면 아직 거절 이후 사용량이 안 올라온 거예요. "
+        "보유 재고는 많은데 거절 전·후 사용량이 거의 없다면, 쓰지 않는 재고를 쥐고 거절한 경우일 수 있어요."
+    )
+
+    labels = {f"{r['거절한 캠프']} · {r['품목명']} ({r['SKU']})": r for _, r in track.iterrows()}
+    picked = labels[st.selectbox("주간 사용량을 볼 품목", list(labels.keys()), key="reject_track_pick")]
+    w0 = week_start_of(picked["최초 거절일"])
+    end = max(last_wk or w0, w0)
+    weeks = [w0 - timedelta(weeks=BEFORE_WEEKS) + timedelta(weeks=i)
+             for i in range((end - w0).days // 7 + BEFORE_WEEKS + 1)]
+    s = weekly[(weekly["camp"] == picked["거절한 캠프"]) & (weekly["code"] == picked["SKU"])]
+    qty_by_week = dict(zip(s["week_start"], s["qty"]))
+    chart_df = pd.DataFrame({
+        "주": [f"{w:%m/%d}주" for w in weeks],
+        "사용량": [qty_by_week.get(w, 0) for w in weeks],
+        "구간": ["거절 전" if w < w0 else "거절 후" for w in weeks],
+    })
+    st.altair_chart(
+        render_group_bars(chart_df, "주", "사용량", "구간", {"거절 전": CHART_MUTED, "거절 후": ACCENT_2}),
+        width="stretch",
+    )
+    st.caption(
+        f"{picked['거절한 캠프']}에서 {picked['최초 거절일']}에 처음 거절 (요청한 캠프: {picked['요청한 캠프']}) · "
+        f"현재 보유 {int(picked['현재 보유']):,}개"
+        + (f" · 최근 거절 사유: {picked['최근 거절 사유']}" if picked["최근 거절 사유"] else "")
+    )
 
 
 def _render_my_camp_transfers(data, camp):
@@ -108,6 +187,10 @@ def render(ctx):
                     st.markdown("**이동중**")
                     for _, r in all_in_transit.iterrows():
                         render_in_transit_request_row(r, data, admin_tr_name, key_prefix="all_", allow_revert=True)
+
+    if auth["role"] == "admin":
+        with st.expander("📉 거절 분석 (관리자 전용)", icon=":material/insights:"):
+            _render_reject_analysis(data)
 
     if my_login_camp:
         _render_my_camp_transfers(data, my_login_camp)

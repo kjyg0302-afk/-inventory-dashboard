@@ -83,6 +83,32 @@ CHART_GRID = "#20293A"
 CHART_MUTED = "#8A96A8"
 
 
+def render_group_bars(df, x_col, y_col, group_col, group_colors, height=220):
+    """구간(예: 거절 전/거절 후)별로 색을 다르게 칠한 막대 그래프 (다크 테마 스타일)."""
+    axis = dict(labelColor=CHART_MUTED, labelFontSize=11, domain=False, ticks=False)
+    return (
+        alt.Chart(df)
+        .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+        .encode(
+            x=alt.X(f"{x_col}:O", sort=None, title=None, axis=alt.Axis(grid=False, labelAngle=-45, **axis)),
+            y=alt.Y(f"{y_col}:Q", title=None, axis=alt.Axis(gridColor=CHART_GRID, tickCount=4, **axis)),
+            color=alt.Color(
+                f"{group_col}:N",
+                scale=alt.Scale(domain=list(group_colors), range=list(group_colors.values())),
+                legend=alt.Legend(title=None, orient="top", labelColor=CHART_MUTED),
+            ),
+            tooltip=[
+                alt.Tooltip(f"{x_col}:O", title=x_col),
+                alt.Tooltip(f"{group_col}:N", title="구간"),
+                alt.Tooltip(f"{y_col}:Q", title=y_col, format=",.0f"),
+            ],
+        )
+        .properties(height=height)
+        .configure_view(strokeWidth=0)
+        .configure(background="transparent")
+    )
+
+
 def render_compare_chart(df, x_col, series_col, y_col, series_colors, height=240):
     """두 개 이상 계열을 같은 축에 선으로 비교한다 (render_trend_chart와 같은 다크 테마 스타일).
     series_colors: {계열명: 색} — 범례 순서도 이 순서."""
