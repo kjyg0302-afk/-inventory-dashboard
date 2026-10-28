@@ -153,25 +153,9 @@ def search_catalog(q, limit=20):
     return df[hay.str.contains(q, regex=False)].head(limit)
 
 
-def _po_seq(po_number, year):
-    m = re.fullmatch(rf"GBIKE-{year}PO_(\d+)", str(po_number or "").strip())
-    return int(m.group(1)) if m else 0
-
-
-def next_po_number(year):
-    """GBIKE-{year}PO_NNN 중 다음 번호. 앱에서 만든 PO와, 양식에 마지막으로 적혀있던 번호(H11)
-    중 큰 값 다음부터 매긴다 — 앱 도입 전에 손으로 발행한 PO번호와 겹치지 않게."""
-    conn = get_db_connection()
-    df = conn.query(
-        "select po_number from vendor_orders where po_number like :p", params={"p": f"GBIKE-{year}PO_%"}, ttl=0
-    )
-    seq = max([_po_seq(p, year) for p in df["po_number"]] + [0])
-    seq = max(seq, _po_seq(template_last_po_number(), year))
-    return f"GBIKE-{year}PO_{seq + 1:03d}"
-
-
 @st.cache_data(ttl=600, show_spinner=False)
 def template_last_po_number():
+    """양식 H11에 마지막으로 적혀 있던 PO번호 — 다음 PO번호 계산에 참고 (procurement.next_po_number)."""
     tpl = load_latest_template()
     if tpl is None:
         return None

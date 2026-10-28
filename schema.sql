@@ -257,49 +257,8 @@ create table if not exists vendors (
     created_at timestamptz not null default now()
 );
 
--- 외부 구매발주(PO) 헤더. 거래처 1곳 + 발주 공통 정보만 가지고, 실제 품목/상태는
--- vendor_order_items에 있다 (실제 발주서처럼 한 PO에 품목 여러 줄을 담을 수 있어서).
-create table if not exists vendor_orders (
-    id bigserial primary key,
-    vendor_id bigint not null references vendors(id),
-    ordered_by text not null,
-    ordered_at timestamptz not null default now(),
-    note text
-);
 
-create index if not exists idx_vendor_orders_vendor on vendor_orders (vendor_id);
-
--- 구매발주 라인(품목별 1행). 같은 PO 안에서도 품목마다 입고예정일/입고일이 다를 수 있어서
--- 상태 전이는 라인 단위로 일어난다: ordered(발주) -> expected(입고예정일 입력됨) ->
--- received(입고완료, 수령수량 포함) / 언제든 cancelled 가능.
--- 현재고+입고예정 통합 뷰는 status in ('ordered','expected')인 라인을 item_code로 묶어서 쓴다.
--- 생산/선적 등 세부 단계는 거래처가 실시간 공유를 못 해줘서 1차 범위에서 추적하지 않는다
--- (내자/외자 모두 이 3단계로 동일하게 간다).
-create table if not exists vendor_order_items (
-    id bigserial primary key,
-    vendor_order_id bigint not null references vendor_orders(id),
-    item_code text not null,
-    item_name text not null,
-    qty numeric not null,
-    unit_price numeric,
-    currency text not null default 'KRW',
-    amt numeric,
-    status text not null default 'ordered',  -- ordered / expected / received / cancelled
-    expected_arrival_date date,
-    received_qty numeric,
-    received_by text,
-    received_at timestamptz,
-    updated_at timestamptz not null default now()
-);
-
--- PO(발주서) 정보: PO번호(GBIKE-연도PO_일련번호), 발주일, 납기일(PO당 하나), 통화(PO당 하나).
-alter table vendor_orders add column if not exists po_number text unique;
-alter table vendor_orders add column if not exists po_date date;
-alter table vendor_orders add column if not exists due_date date;
-alter table vendor_orders add column if not exists currency text default 'USD';
--- 라인별 거래처 부품번호(나인봇 AB.xx)와 포장단위(MPQ). 발주서 출력에 쓴다.
-alter table vendor_order_items add column if not exists package_no text;
-alter table vendor_order_items add column if not exists mpq numeric;
+-- (예전 vendor_orders / vendor_order_items는 2026-10 purchase_lines / purchase_receipts로 대체되어 삭제)
 
 -- 발주서 엑셀 양식 원본. 가장 최근 업로드가 현재 양식.
 -- 나인봇 단가가 들어있어서 공개 GitHub 저장소 대신 DB에 보관한다 (readonly_viewer 권한 미부여).
@@ -326,6 +285,65 @@ create table if not exists parts_catalog (
 
 create index if not exists idx_parts_catalog_sku on parts_catalog (sku);
 
-create index if not exists idx_vendor_order_items_order on vendor_order_items (vendor_order_id);
-create index if not exists idx_vendor_order_items_item on vendor_order_items (item_code);
-create index if not exists idx_vendor_order_items_status on vendor_order_items (status);
+
+-- ===== 구매 E2E (구매요청 → PO → 선적 → 입고 → 대금) =====
+-- 구매팀 E2E 엑셀(발주관리 시트) 한 줄 = PO 라인 1행. 2026-10 엑셀을 가져와 앱이 원본이 됐고,
+-- 전환 기간엔 엑셀을 다시 올리면 바뀐 줄만 갱신한다 (purchase_import.py).
+-- 입고수량·미입고·상태·리드타임은 purchase_receipts에서 조회할 때 계산한다 (저장 안 함).
+create table if not exists purchase_lines (
+    id bigserial primary key,
+    line_no text not null unique,      -- 관리번호 (L0001…). 엑셀에 없거나 중복이면 새로 부여
+    fingerprint text,                  -- PO번호|제조사PN|품명|발주수량#순번 — 관리번호 없는 줄 재매칭용
+    pr_no text,                        -- 구매요청(PR) 번호
+    pr_requested_on date,
+    pr_approved_on date,
+    pr_dept text,
+    pr_requester text,
+    pr_basis text,                     -- 구매요청 근거
+    category text,                     -- 품목 유형
+    po_no text,                        -- 2026PO_034 형식 (발주서에는 GBIKE- 접두어를 붙여 출력)
+    po_approved_on date,
+    buyer text,                        -- 구매 담당자
+    supply_type text,                  -- '내자' / '외자'
+    pi_no text,
+    supplier text,
+    item_code text,                    -- 우리 SKU (비어 있으면 조회 시 parts_catalog로 보완)
+    item_name text,
+    mfr_pn text,                       -- 제조사 PN (나인봇 AB.xx = parts_catalog.package_no)
+    spec text,
+    qty numeric not null,
+    unit_price numeric,
+    currency text,
+    amount numeric,
+    fx_rate numeric,
+    amount_krw numeric,
+    contract_due date,                 -- 계약 납기
+    bl_no text,
+    import_decl_no text,               -- 수입신고필증 번호
+    excel_status text,                 -- 엑셀 납품 진행 상태 (생산 중 등) — 입고 전 표시용
+    destination text,                  -- 입고처 (대구=국내 창고, 태국/LA/MEMPHIS… 해외 거점)
+    tax_invoice_on date,
+    paid_on date,
+    pay_status text,
+    note text,
+    source text not null default 'excel',  -- 'excel' / 'app'
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+create index if not exists idx_purchase_lines_po on purchase_lines (po_no);
+create index if not exists idx_purchase_lines_item on purchase_lines (item_code);
+create index if not exists idx_purchase_lines_pn on purchase_lines (mfr_pn);
+
+-- 입고 기록. 분할 입고면 여러 행. source='excel'은 엑셀의 누적 입고값(줄당 1행),
+-- 'app'은 앱에서 등록한 입고 — 앱 입고가 있는 줄은 엑셀 재업로드 때 입고값을 덮지 않는다.
+create table if not exists purchase_receipts (
+    id bigserial primary key,
+    line_id bigint not null references purchase_lines(id) on delete cascade,
+    qty numeric not null,
+    received_on date,
+    location text,
+    source text not null,
+    entered_by text,
+    created_at timestamptz not null default now()
+);
+create index if not exists idx_purchase_receipts_line on purchase_receipts (line_id);

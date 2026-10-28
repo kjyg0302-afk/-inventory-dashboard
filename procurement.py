@@ -1,177 +1,163 @@
-"""외부 구매발주(내자/외자) — 거래처에 발주 넣고 입고예정/입고까지 추적.
-재고이관(창고<>캠프, purchase_orders.py)과 달리 회사 바깥 거래처에서 실제로 물건을
-사오는 과정을 다룬다. 상태 전이는 vendor_order_items 라인 단위로 일어난다:
-ordered(발주) -> expected(입고예정일 입력됨) -> received(입고완료) / 언제든 cancelled."""
+"""외부 구매(내자/외자) — 구매요청 → PO → 선적 → 입고 → 대금까지 PO 라인 단위로 관리.
 
+purchase_lines(PO 라인, 구매 E2E 엑셀의 한 줄)와 purchase_receipts(입고 기록)가 원본이다.
+입고수량·미입고·상태·리드타임은 저장하지 않고 조회할 때 입고 기록으로 계산한다.
+재고이관(창고<>캠프, purchase_orders.py)과 달리 회사 바깥 거래처에서 사오는 구매다."""
+
+import re
+from datetime import datetime
+
+import pandas as pd
 import streamlit as st
 from sqlalchemy import text
 
 from db import get_db_connection
+from formatting import KST
+
+# 국내 창고 입고분만 "현재고 + 입고예정"에 넣는다 (태국·LA·MEMPHIS… 해외 거점 입고는 제외).
+DOMESTIC_PATTERN = "대구|한국"
+STATUS_DONE, STATUS_PARTIAL, STATUS_ORDERED = "입고 완료", "부분 입고", "발주"
 
 
-@st.cache_data(ttl=15)
-def list_vendor_order_items(statuses=None):
-    """구매발주 라인을 거래처/발주 정보와 함께 조회. statuses를 주면 그 상태만 필터링."""
+def _status(row):
+    if row["qty"] > 0 and row["received_qty"] >= row["qty"]:
+        return STATUS_DONE
+    if row["received_qty"] > 0:
+        return STATUS_PARTIAL
+    s = row["excel_status"]
+    # 입고 기록이 없는데 엑셀에 '입고 완료'라고 적힌 줄은 수량 기준으로 다시 판단한다.
+    return s if isinstance(s, str) and s not in (STATUS_DONE, STATUS_PARTIAL) else STATUS_ORDERED
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_purchase_lines():
+    """PO 라인 전체 + 입고 합계·미입고·상태·리드타임. SKU가 비면 부품 카탈로그(제조사PN)로 보완."""
     conn = get_db_connection()
-    sql = """
-        select i.*, o.vendor_id, o.ordered_by, o.ordered_at, o.note as order_note,
-               o.po_number, o.due_date, v.name as vendor_name, v.vendor_type
-        from vendor_order_items i
-        join vendor_orders o on o.id = i.vendor_order_id
-        join vendors v on v.id = o.vendor_id
-    """
-    params = {}
-    if statuses:
-        sql += " where i.status = any(:statuses)"
-        params["statuses"] = list(statuses)
-    sql += " order by o.ordered_at desc, i.id"
-    return conn.query(sql, params=params, ttl=0)
+    df = conn.query(
+        """
+        select l.*, coalesce(l.item_code, c.sku) as sku,
+               coalesce(r.received_qty, 0) as received_qty, r.last_received_on, r.app_receipts
+        from purchase_lines l
+        left join parts_catalog c on c.package_no = l.mfr_pn
+        left join (
+            select line_id, sum(qty) as received_qty, max(received_on) as last_received_on,
+                   count(*) filter (where source = 'app') as app_receipts
+            from purchase_receipts group by line_id
+        ) r on r.line_id = l.id
+        order by l.po_approved_on desc nulls last, l.po_no, l.line_no
+        """,
+        ttl=0,
+    )
+    for col in ["qty", "received_qty", "unit_price", "amount", "fx_rate", "amount_krw"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["received_qty"] = df["received_qty"].fillna(0)
+    df["open_qty"] = (df["qty"] - df["received_qty"]).clip(lower=0)
+    df["status"] = df.apply(_status, axis=1) if not df.empty else pd.Series(dtype=str)
+    for col in ["po_approved_on", "last_received_on", "contract_due", "pr_requested_on", "paid_on"]:
+        df[col] = pd.to_datetime(df[col], errors="coerce")
+    df["lead_days"] = (df["last_received_on"] - df["po_approved_on"]).dt.days.where(df["status"] == STATUS_DONE)
+    today = pd.Timestamp(datetime.now(KST).date())
+    df["overdue"] = (df["open_qty"] > 0) & df["contract_due"].notna() & (df["contract_due"] < today)
+    df["po_year"] = df["po_approved_on"].dt.year.astype("Int64")
+    df["domestic"] = df["destination"].fillna("").str.contains(DOMESTIC_PATTERN)
+    return df
 
 
-def incoming_qty_by_item():
-    """아직 입고 안 된(ordered/expected) 라인을 item_code로 묶은 입고예정수량."""
+def list_receipts(line_ids):
+    if not line_ids:
+        return pd.DataFrame()
     conn = get_db_connection()
     return conn.query(
         """
-        select item_code, item_name, sum(qty) as incoming_qty,
-               min(expected_arrival_date) as earliest_expected
-        from vendor_order_items
-        where status in ('ordered', 'expected')
-        group by item_code, item_name
-        order by item_name
+        select r.*, l.line_no, l.item_name from purchase_receipts r
+        join purchase_lines l on l.id = r.line_id
+        where r.line_id = any(:ids) order by r.received_on nulls first, r.id
         """,
-        ttl=15,
+        params={"ids": [int(i) for i in line_ids]},
+        ttl=0,
     )
 
 
-def po_number_exists(po_number):
+def add_receipt(line_id, qty, received_on, location, entered_by):
+    conn = get_db_connection()
+    with conn.session as session:
+        session.execute(
+            text(
+                "insert into purchase_receipts (line_id, qty, received_on, location, source, entered_by) "
+                "values (:l, :q, :d, :loc, 'app', :by)"
+            ),
+            {"l": int(line_id), "q": qty, "d": received_on, "loc": location or None, "by": entered_by},
+        )
+        session.commit()
+    load_purchase_lines.clear()
+
+
+def delete_app_receipt(receipt_id):
+    """앱에서 잘못 등록한 입고 취소 (엑셀에서 온 입고 기록은 지우지 않는다)."""
+    conn = get_db_connection()
+    with conn.session as session:
+        session.execute(
+            text("delete from purchase_receipts where id = :id and source = 'app'"), {"id": int(receipt_id)}
+        )
+        session.commit()
+    load_purchase_lines.clear()
+
+
+def po_exists(po_no):
     conn = get_db_connection()
     return not conn.query(
-        "select 1 from vendor_orders where po_number = :p", params={"p": po_number}, ttl=0
+        "select 1 from purchase_lines where trim(po_no) = :p limit 1", params={"p": po_no.strip()}, ttl=0
     ).empty
 
 
-def create_vendor_order(vendor_id, ordered_by, note, line_items, po_number, po_date, due_date, currency):
-    """PO 헤더 1개 + 라인 여러 개를 한 번에 등록. line_items: [{item_code, item_name, package_no,
-    mpq, qty, unit_price, amt}, ...] — 통화는 PO 단위로 하나라서 라인에도 같은 값을 넣는다."""
+def _next_line_no(session):
+    nums = session.execute(text("select line_no from purchase_lines where line_no ~ '^L[0-9]+$'")).scalars()
+    return max([int(n[1:]) for n in nums] + [0]) + 1
+
+
+def create_purchase_order(header, lines):
+    """앱에서 만든 PO를 purchase_lines(source='app')에 줄마다 저장. 관리번호는 이어서 부여.
+    header: {po_no, po_date, due_date, currency, supplier, supply_type, destination, buyer, note}"""
     conn = get_db_connection()
     with conn.session as session:
-        result = session.execute(
-            text(
-                """
-                insert into vendor_orders (vendor_id, ordered_by, note, po_number, po_date, due_date, currency)
-                values (:vendor_id, :ordered_by, :note, :po_number, :po_date, :due_date, :currency)
-                returning id
-                """
-            ),
-            {
-                "vendor_id": vendor_id, "ordered_by": ordered_by, "note": note or None,
-                "po_number": po_number, "po_date": po_date, "due_date": due_date, "currency": currency,
-            },
-        )
-        order_id = result.scalar_one()
-        for line in line_items:
+        session.execute(text("lock table purchase_lines in share row exclusive mode"))
+        n = _next_line_no(session)
+        for i, ln in enumerate(lines):
             session.execute(
                 text(
                     """
-                    insert into vendor_order_items
-                        (vendor_order_id, item_code, item_name, package_no, mpq, qty, unit_price, currency, amt)
-                    values (:order_id, :item_code, :item_name, :package_no, :mpq, :qty, :unit_price, :currency, :amt)
+                    insert into purchase_lines
+                        (line_no, po_no, po_approved_on, contract_due, currency, supplier, supply_type,
+                         destination, buyer, note, item_code, item_name, mfr_pn, qty, unit_price, amount, source)
+                    values (:line_no, :po_no, :po_date, :due_date, :currency, :supplier, :supply_type,
+                            :destination, :buyer, :note, :item_code, :item_name, :mfr_pn, :qty, :unit_price,
+                            :amount, 'app')
                     """
                 ),
                 {
-                    "order_id": order_id,
-                    "item_code": line["item_code"],
-                    "item_name": line["item_name"],
-                    "package_no": line.get("package_no"),
-                    "mpq": line.get("mpq"),
-                    "qty": line["qty"],
-                    "unit_price": line.get("unit_price"),
-                    "currency": currency,
-                    "amt": line.get("amt"),
+                    **header, "line_no": f"L{n + i:04d}", "note": header.get("note") or None,
+                    "item_code": ln.get("item_code"), "item_name": ln["item_name"],
+                    "mfr_pn": ln.get("package_no"), "qty": ln["qty"], "unit_price": ln.get("unit_price"),
+                    "amount": ln.get("amt"),
                 },
             )
         session.commit()
-    return order_id
+    load_purchase_lines.clear()
 
 
-@st.cache_data(ttl=15)
-def list_vendor_orders():
-    """PO 단위 목록 + 라인 집계 (품목 수, 총수량, 입고완료/취소 라인 수, 총금액)."""
+def doc_po_number(po_no):
+    """발주서에 찍는 번호: 원장 2026PO_034 -> GBIKE-2026PO_034 (FOC 등 다른 형식은 그대로)."""
+    po_no = str(po_no or "").strip()
+    return f"GBIKE-{po_no}" if re.fullmatch(r"\d{4}PO_\d+", po_no) else po_no
+
+
+def next_po_number(year, template_po=None):
+    """{year}PO_NNN 중 다음 번호 — 원장(엑셀에서 가져온 PO 포함)과 발주서 양식 H11 중 큰 값 다음."""
     conn = get_db_connection()
-    return conn.query(
-        """
-        select o.id, o.po_number, o.po_date, o.due_date, o.currency, o.ordered_by, o.ordered_at, o.note,
-               v.name as vendor_name, v.vendor_type,
-               count(i.id) as line_count,
-               coalesce(sum(i.qty), 0) as total_qty,
-               coalesce(sum(i.amt), 0) as total_amt,
-               count(i.id) filter (where i.status = 'received') as received_lines,
-               count(i.id) filter (where i.status = 'cancelled') as cancelled_lines
-        from vendor_orders o
-        join vendors v on v.id = o.vendor_id
-        left join vendor_order_items i on i.vendor_order_id = o.id
-        group by o.id, v.name, v.vendor_type
-        order by o.ordered_at desc
-        """,
-        ttl=0,
+    df = conn.query(
+        "select distinct trim(po_no) as po_no from purchase_lines where po_no like :p",
+        params={"p": f"{year}PO_%"}, ttl=0,
     )
-
-
-@st.cache_data(ttl=15)
-def list_po_lines():
-    """발주서 재출력용: 전체 PO 라인을 한 번에 (카탈로그 영문명 포함). PO 목록에서 PO마다
-    따로 조회하지 않고 이걸 vendor_order_id로 나눠 쓴다."""
-    conn = get_db_connection()
-    return conn.query(
-        """
-        select i.vendor_order_id, i.package_no, i.item_code, i.item_name, i.qty, i.unit_price, i.mpq, c.desc_en
-        from vendor_order_items i
-        left join parts_catalog c on c.package_no = i.package_no
-        order by i.vendor_order_id, i.id
-        """,
-        ttl=0,
-    )
-
-
-def set_expected_arrival(item_id, expected_date):
-    conn = get_db_connection()
-    with conn.session as session:
-        session.execute(
-            text(
-                """
-                update vendor_order_items
-                set status = 'expected', expected_arrival_date = :expected_date, updated_at = now()
-                where id = :id and status = 'ordered'
-                """
-            ),
-            {"id": item_id, "expected_date": expected_date},
-        )
-        session.commit()
-
-
-def receive_item(item_id, received_qty, received_by):
-    conn = get_db_connection()
-    with conn.session as session:
-        session.execute(
-            text(
-                """
-                update vendor_order_items
-                set status = 'received', received_qty = :received_qty, received_by = :received_by,
-                    received_at = now(), updated_at = now()
-                where id = :id and status = 'expected'
-                """
-            ),
-            {"id": item_id, "received_qty": received_qty, "received_by": received_by},
-        )
-        session.commit()
-
-
-def cancel_item(item_id):
-    conn = get_db_connection()
-    with conn.session as session:
-        session.execute(
-            text("update vendor_order_items set status = 'cancelled', updated_at = now() where id = :id"),
-            {"id": item_id},
-        )
-        session.commit()
+    seqs = [int(m.group(1)) for p in list(df["po_no"]) + [template_po]
+            if (m := re.fullmatch(rf"(?:GBIKE-)?{year}PO_(\d+)", str(p or "").strip()))]
+    return f"{year}PO_{max(seqs + [0]) + 1:03d}"

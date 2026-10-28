@@ -90,7 +90,7 @@ TAB_DEFS = [
     ("forecast", ":material/query_stats: FORECAST"),
     ("warehouse", ":material/warehouse: 창고 현황"),
     ("purchase", ":material/local_shipping: 재고이관(창고<>캠프)"),
-    ("procurement", ":material/shopping_cart: 구매발주(외부)"),
+    ("procurement", ":material/shopping_cart: 구매·PO 관리"),
     ("total", ":material/inventory: 지바이크 전체 재고"),
 ]
 
