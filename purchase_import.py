@@ -142,9 +142,8 @@ def read_e2e_excel(file):
                 rec[col] = _clean_text(v)
         if rec["qty"] is None and rec["item_name"] is None:
             continue  # 빈 줄
+        # 품목번호(SKU)는 대소문자 그대로 둔다 — 재고 데이터의 SKU도 GSPLs5002처럼 소문자가 섞여 있다.
         rec["qty"] = rec["qty"] or 0.0
-        if rec["item_code"]:
-            rec["item_code"] = rec["item_code"].upper()
         price = rec["unit_price"]
         rec["amount"] = round(rec["qty"] * price, 4) if price is not None else None
         rec["amount_krw"] = (
