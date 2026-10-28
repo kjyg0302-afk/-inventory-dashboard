@@ -75,11 +75,12 @@ def _line_table(df, extra_cols=()):
     cols = {
         "po_no": "PO", "line_no": "관리번호", "supplier": "공급사", "item_name": "품명", "sku": "SKU",
         "mfr_pn": "제조사 PN", "qty": "발주", "received_qty": "입고", "open_qty": "잔량", "status": "상태",
-        "po_approved_on": "PO 승인일", "contract_due": "계약 납기", "last_received_on": "최근 입고일",
-        "destination": "입고처", **dict(extra_cols),
+        "po_approved_on": "PO 승인일", "contract_due": "계약 납기", "expected_on": "예상 입고일",
+        "last_received_on": "최근 입고일", "destination": "입고처", **dict(extra_cols),
     }
-    out = df[list(cols)].rename(columns=cols)
-    for c in ["PO 승인일", "계약 납기", "최근 입고일"]:
+    # 다 들어온 줄은 예상 입고일이 의미 없어서 비운다.
+    out = df.assign(expected_on=df["expected_on"].where(df["open_qty"] > 0))[list(cols)].rename(columns=cols)
+    for c in ["PO 승인일", "계약 납기", "예상 입고일", "최근 입고일"]:
         out[c] = out[c].dt.date
     return out
 
@@ -91,7 +92,7 @@ def _render_open(lines, today):
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("진행 중 PO", f"{open_lines['po_no'].nunique():,}건", border=True)
     k2.metric("미입고", f"{len(open_lines):,}줄 · {open_lines['open_qty'].sum():,.0f}개", border=True)
-    k3.metric("계약 납기 지난 미입고", f"{int(open_lines['overdue'].sum()):,}줄", border=True)
+    k3.metric("예상 입고일 지난 미입고", f"{int(open_lines['overdue'].sum()):,}줄", border=True)
     k4.metric(f"{today.year}년 발주 PO", f"{this_year['po_no'].nunique():,}건", border=True)
     st.caption(f"{today.year}년 발주 금액: {_amount_by_currency(this_year)}")
 
@@ -100,10 +101,13 @@ def _render_open(lines, today):
         st.caption("미입고 줄이 없어요.")
     else:
         t = open_lines.assign(경과일=(pd.Timestamp(today) - open_lines["po_approved_on"]).dt.days)
-        t = t.sort_values(["overdue", "po_approved_on"], ascending=[False, True])
-        table = _line_table(t, [("경과일", "PO 후 경과일"), ("overdue", "납기 지연")])
+        t = t.sort_values(["overdue", "expected_on"], ascending=[False, True])
+        table = _line_table(t, [("경과일", "PO 후 경과일"), ("overdue", "입고 지연")])
         st.dataframe(table, hide_index=True, width="stretch")
-        st.caption("상태 '생산 중'은 엑셀에 적혀 있던 진행 상태예요. 입고를 등록하면 수량 기준으로 바뀌어요.")
+        st.caption(
+            "예상 입고일은 계약 납기가 있으면 그 날짜, 없으면 PO 승인일 + 3.5개월이에요. "
+            "상태 '생산 중'은 엑셀에 적혀 있던 진행 상태예요. 입고를 등록하면 수량 기준으로 바뀌어요."
+        )
 
     with st.expander("국내 재고 요약 (박스히어로 현재고 + 입고예정)", icon=":material/inventory_2:"):
         dom = open_lines[open_lines["domestic"]]
@@ -119,20 +123,20 @@ def _render_open(lines, today):
         key = dom["sku"].fillna(dom["mfr_pn"]).fillna(dom["item_name"])
         g = dom.assign(key=key).groupby("key", as_index=False).agg(
             품명=("item_name", "last"), 입고예정=("open_qty", "sum"), PO=("po_no", lambda s: ", ".join(sorted(set(s.dropna())))),
-            가장_이른_납기=("contract_due", "min"),
+            가장_이른_입고=("expected_on", "min"),
         )
         g["현재고"] = g["key"].str.upper().map(stock)
         g["합계"] = g["현재고"] + g["입고예정"]
-        g["가장_이른_납기"] = g["가장_이른_납기"].dt.date
-        g = g.rename(columns={"key": "SKU / PN", "가장_이른_납기": "가장 이른 계약 납기"})
-        st.dataframe(g[["SKU / PN", "품명", "현재고", "입고예정", "합계", "가장 이른 계약 납기", "PO"]],
+        g["가장_이른_입고"] = g["가장_이른_입고"].dt.date
+        g = g.rename(columns={"key": "SKU / PN", "가장_이른_입고": "가장 이른 예상 입고일"})
+        st.dataframe(g[["SKU / PN", "품명", "현재고", "입고예정", "합계", "가장 이른 예상 입고일", "PO"]],
                      hide_index=True, width="stretch")
         st.caption("입고처가 대구·한국인 미입고만 더했어요. SKU가 없는 품목은 현재고를 알 수 없어 비어 있어요.")
 
 
 # ---------------------------------------------------------------- PO 목록 + 상세
 def _po_summary(lines):
-    g = lines.groupby("po_no", dropna=False)
+    g = lines.assign(open_expected=lines["expected_on"].where(lines["open_qty"] > 0)).groupby("po_no", dropna=False)
     po = g.agg(
         공급사=("supplier", lambda s: ", ".join(sorted(set(s.dropna()))) or "-"),
         구분=("supply_type", "first"),
@@ -142,6 +146,7 @@ def _po_summary(lines):
         입고=("received_qty", "sum"),
         잔량=("open_qty", "sum"),
         계약납기=("contract_due", "min"),
+        예상입고=("open_expected", "min"),
         지연=("overdue", "sum"),
         원본=("source", lambda s: "앱" if (s == "app").all() else "엑셀"),
     ).reset_index()
@@ -150,7 +155,9 @@ def _po_summary(lines):
     po["금액"] = po["po_no"].map(lambda p: _amount_by_currency(lines[lines["po_no"] == p]))
     po["승인일"] = po["승인일"].dt.date
     po["계약납기"] = po["계약납기"].dt.date
-    return po.rename(columns={"po_no": "PO번호", "계약납기": "계약 납기", "지연": "납기 지연 줄"}).sort_values(
+    po["예상입고"] = po["예상입고"].dt.date
+    return po.rename(columns={"po_no": "PO번호", "계약납기": "계약 납기", "예상입고": "예상 입고일",
+                              "지연": "입고 지연 줄"}).sort_values(
         "승인일", ascending=False, na_position="last"
     )
 
@@ -181,8 +188,8 @@ def _render_po_list(lines, today):
 
     st.caption(f"PO {len(po):,}건 · 표에서 PO를 고르면 아래에 상세와 입고 등록이 나와요.")
     event = st.dataframe(
-        po[["PO번호", "상태", "공급사", "구분", "승인일", "계약 납기", "줄", "발주", "입고", "잔량", "진행률",
-            "납기 지연 줄", "금액", "원본"]],
+        po[["PO번호", "상태", "공급사", "구분", "승인일", "예상 입고일", "줄", "발주", "입고", "잔량", "진행률",
+            "입고 지연 줄", "금액", "원본"]],
         hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row", key="proc_po_table",
         column_config={"진행률": st.column_config.ProgressColumn("입고율", format="%.0f%%", min_value=0, max_value=100)},
     )

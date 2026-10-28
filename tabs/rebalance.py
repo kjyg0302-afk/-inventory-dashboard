@@ -22,6 +22,7 @@ from reject_analysis import (
     load_rejections,
     week_start_of,
 )
+from procurement import incoming_for_sku, load_purchase_lines
 from usage_calc import get_usage_for_code
 from transfers import (
     list_all_transfer_requests,
@@ -114,6 +115,51 @@ def _render_reject_analysis(data):
         f"현재 보유 {int(picked['현재 보유']):,}개"
         + (f" · 최근 거절 사유: {picked['최근 거절 사유']}" if picked["최근 거절 사유"] else "")
     )
+
+
+def _incoming_qty_by_sku():
+    """{SKU(대문자): 국내 입고 예정 수량} — 검색 결과에 입고 예정을 같이 보여주기 위함."""
+    try:
+        df = load_purchase_lines()
+    except Exception:
+        return {}
+    df = df[(df["open_qty"] > 0) & df["domestic"] & df["sku"].notna()]
+    return df.groupby(df["sku"].str.strip().str.upper())["open_qty"].sum().to_dict()
+
+
+def _render_incoming(item_code):
+    """선택한 품목의 미입고 구매(PO) — 물류창고로 언제 얼마나 들어올지."""
+    try:
+        inc = incoming_for_sku(item_code)
+    except Exception:
+        st.caption("구매 입고 예정 정보를 불러오지 못했어요.")
+        return
+    if inc.empty:
+        st.caption(":material/local_shipping: 이 품목은 구매 진행 중인 미입고 PO가 없어요.")
+        return
+    first = inc.iloc[0]
+    st.info(
+        f"**구매 입고 예정 {inc['open_qty'].sum():,.0f}개** · PO {inc['po_no'].nunique()}건 · "
+        f"가장 빠른 예상 입고일 {first['expected_on']:%Y-%m-%d}"
+        + (" (지연 중)" if inc["overdue"].any() else ""),
+        icon=":material/local_shipping:",
+    )
+    table = pd.DataFrame({
+        "PO": inc["po_no"],
+        "발주일": inc["po_approved_on"].dt.date,
+        "발주": inc["qty"],
+        "입고": inc["received_qty"],
+        "미입고": inc["open_qty"],
+        "예상 입고일": inc["expected_on"].dt.date,
+        "입고처": inc["destination"],
+        "상태": inc["status"],
+    })
+    st.dataframe(
+        table,
+        hide_index=True,
+        column_config={c: st.column_config.NumberColumn(format="%,d개") for c in ["발주", "입고", "미입고"]},
+    )
+    st.caption("예상 입고일은 계약 납기가 있으면 그 날짜, 없으면 발주일(PO 승인일) + 3.5개월이에요.")
 
 
 def _render_my_camp_transfers(data, camp):
@@ -232,7 +278,13 @@ def render(ctx):
                     f"검색 결과 {len(all_candidates)}건 중 상위 {len(candidates)}개만 표시했어요. "
                     "검색어를 더 구체적으로 입력하면 찾는 품목이 더 잘 보여요."
                 )
-            options = {f"{it['n']} ({it['c']})": it for it in candidates}
+            incoming = _incoming_qty_by_sku()
+
+            def _label(it):
+                n = incoming.get(str(it["c"]).strip().upper())
+                return f"{it['n']} ({it['c']})" + (f" · 입고예정 {n:,.0f}개" if n else "")
+
+            options = {_label(it): it for it in candidates}
             picked_label = st.radio("검색 결과", list(options.keys()), index=0)
             selected = options[picked_label]
         else:
@@ -299,6 +351,8 @@ def render(ctx):
                     f"약 {move_qty}개 이동을 검토해보세요. (사용량 데이터가 없어 재고량만 기준으로 한 참고용 제안)",
                     icon=":material/lightbulb:",
                 )
+
+        _render_incoming(selected["c"])
 
         st.subheader("캠프 간 재고 이관")
         st.caption("요청 → 승인(이동중) → 입고완료 순서로 처리돼요. 실제 재고 수량은 입고완료 시점에 보내는 캠프에서 빠지고 받는 캠프에 더해지며, 승인되면 그 전까지는 \"가용재고\"에서만 미리 제외되어 보입니다.")

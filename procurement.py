@@ -17,6 +17,8 @@ from formatting import KST
 # 국내 창고 입고분만 "현재고 + 입고예정"에 넣는다 (태국·LA·MEMPHIS… 해외 거점 입고는 제외).
 DOMESTIC_PATTERN = "대구|한국"
 STATUS_DONE, STATUS_PARTIAL, STATUS_ORDERED = "입고 완료", "부분 입고", "발주"
+# 계약 납기가 없는 줄은 PO 승인일 + 3.5개월을 예상 입고일로 본다.
+DEFAULT_LEAD = pd.DateOffset(months=3, days=15)
 
 
 def _status(row):
@@ -57,10 +59,19 @@ def load_purchase_lines():
         df[col] = pd.to_datetime(df[col], errors="coerce")
     df["lead_days"] = (df["last_received_on"] - df["po_approved_on"]).dt.days.where(df["status"] == STATUS_DONE)
     today = pd.Timestamp(datetime.now(KST).date())
-    df["overdue"] = (df["open_qty"] > 0) & df["contract_due"].notna() & (df["contract_due"] < today)
+    df["expected_on"] = df["contract_due"].fillna(df["po_approved_on"] + DEFAULT_LEAD)
+    df["overdue"] = (df["open_qty"] > 0) & df["expected_on"].notna() & (df["expected_on"] < today)
     df["po_year"] = df["po_approved_on"].dt.year.astype("Int64")
     df["domestic"] = df["destination"].fillna("").str.contains(DOMESTIC_PATTERN)
     return df
+
+
+def incoming_for_sku(sku):
+    """국내(대구·한국)로 들어올 미입고 줄 — 재고이관 화면에서 품목별 입고 예정을 보여줄 때 쓴다."""
+    df = load_purchase_lines()
+    key = str(sku or "").strip().upper()
+    hit = (df["open_qty"] > 0) & df["domestic"] & (df["sku"].fillna("").str.strip().str.upper() == key)
+    return df[hit].sort_values("expected_on")
 
 
 def list_receipts(line_ids):
