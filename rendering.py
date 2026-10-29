@@ -3,6 +3,7 @@
 
 import streamlit as st
 
+from auth import NO_STOCK_ACCOUNTS
 from formatting import fmt_request_timeline, fmt_transfer_qty
 from stock_ops import find_item_by_code, deduct_camp_stock, add_camp_stock
 from app_data import save_data
@@ -43,8 +44,8 @@ def render_pending_request_row(r, data, my_name, key_prefix=""):
         if st.button("승인 확정", key=f"{key_prefix}approve_{r['id']}", type="primary"):
             if not my_name.strip():
                 st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
-            elif r["from_camp"] == "물류창고":
-                # 물류창고 재고는 이 앱의 캠프 재고 데이터에 없어서(박스히어로 쪽에서 별도 관리)
+            elif r["from_camp"] in NO_STOCK_ACCOUNTS:
+                # 물류창고(박스히어로에서 별도 관리)·본사 재고는 이 앱의 캠프 재고 데이터에 없어서
                 # 가용재고 검증을 건너뛴다.
                 approve_transfer_request(r["id"], my_name.strip(), send_qty)
                 list_transfer_requests.clear()
@@ -87,7 +88,7 @@ def render_pending_request_row(r, data, my_name, key_prefix=""):
 def render_in_transit_request_row(r, data, my_name, key_prefix="", allow_revert=False):
     """이동중 상태인 이관 요청 한 건을 표시하고 입고완료 버튼을 처리한다.
     로그인 배너의 "입고 확인 필요" 목록과 재분배 도우미 탭 양쪽에서 재사용한다.
-    물류창고는 이 앱의 캠프 재고 데이터에 없어서, 물류창고가 보내거나 받는 쪽이면
+    물류창고·본사는 이 앱의 캠프 재고 데이터에 없어서, 그쪽이 보내거나 받는 쪽이면
     그쪽의 재고 증감 계산만 건너뛴다 (박스히어로 쪽 실제 재고는 창고에서 수동으로 맞춤).
     allow_revert=True(관리자 전체 현황)이면 잘못 누른 승인을 되돌리는 버튼도 보여준다."""
     if allow_revert:
@@ -123,14 +124,14 @@ def render_in_transit_request_row(r, data, my_name, key_prefix="", allow_revert=
             else:
                 item = find_item_by_code(data, r["item_code"])
                 try:
-                    if r["from_camp"] == "물류창고":
+                    if r["from_camp"] in NO_STOCK_ACCOUNTS:
                         moved_amt = 0
                     else:
                         moved_amt = deduct_camp_stock(item, r["from_camp"], int(recv_qty))
                 except ValueError as e:
                     st.error(str(e), icon=":material/error:")
                 else:
-                    if r["to_camp"] != "물류창고":
+                    if r["to_camp"] not in NO_STOCK_ACCOUNTS:
                         add_camp_stock(item, r["to_camp"], int(recv_qty), moved_amt)
                     save_data("inventory", data)
                     complete_transfer_request(r["id"], my_name.strip(), moved_amt, recv_qty)

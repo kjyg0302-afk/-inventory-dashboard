@@ -5,6 +5,7 @@ from datetime import timedelta
 import pandas as pd
 import streamlit as st
 
+from auth import NO_STOCK_ACCOUNTS
 from formatting import (
     ACCENT_2,
     CHART_MUTED,
@@ -364,11 +365,11 @@ def render(ctx):
 
         item_code = selected["c"]
         with st.form(f"transfer_request_form_{item_code}"):
-            # 물류창고도 보내는/받는 쪽으로 고를 수 있게 캠프 목록 끝에 추가한다 (물류창고 재고는
+            # 물류창고·본사도 보내는/받는 쪽으로 고를 수 있게 캠프 목록 끝에 추가한다 (이 둘의 재고는
             # 이 앱의 캠프 재고 데이터에 없어서 "캠프별 재고 현황" 표에는 넣지 않고, 요청 생성용
-            # 선택지로만 쓴다 — 가용재고 검증은 승인/입고완료 처리 쪽에서 물류창고만 건너뛴다).
+            # 선택지로만 쓴다 — 가용재고 검증은 승인/입고완료 처리 쪽에서 이 계정들만 건너뛴다).
             camps_order = data["campsOrder"]
-            camps_order_with_wh = camps_order + ["물류창고"]
+            camps_order_with_wh = camps_order + list(NO_STOCK_ACCOUNTS)
             default_from = camps_order.index(suggested_transfer["from"]) if suggested_transfer else 0
             default_to = camps_order.index(suggested_transfer["to"]) if suggested_transfer else min(1, len(camps_order) - 1)
             fc1, fc2, fc3 = st.columns([2, 2, 1])

@@ -7,6 +7,11 @@ from sqlalchemy import text
 
 from db import get_db_connection
 
+# 재고 엑셀(캠프 목록)에는 없지만 캠프처럼 로그인해서 재고이관에 참여하는 계정. 권한은 일반 캠프와 같다.
+EXTRA_CAMP_ACCOUNTS = ["본사(강남)"]
+# 이 앱의 캠프 재고 데이터에 재고가 없는 계정 — 이관 승인/입고 때 재고 검증·증감을 건너뛴다.
+NO_STOCK_ACCOUNTS = ("물류창고", *EXTRA_CAMP_ACCOUNTS)
+
 
 def hash_password(password):
     salt = uuid.uuid4().hex

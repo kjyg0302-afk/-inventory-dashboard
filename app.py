@@ -19,6 +19,7 @@ from parsing import (
 )
 from tableau import get_tableau_config, fetch_tableau_inventory
 from auth import (
+    EXTRA_CAMP_ACCOUNTS,
     verify_password,
     list_camp_credential_names,
     get_camp_password_hash,
@@ -298,7 +299,7 @@ if not data:
 
 # ---------------- 로그인 상태 / 내 캠프 알림 ----------------
 
-_login_accounts = data["campsOrder"] + ["물류창고"]
+_login_accounts = data["campsOrder"] + EXTRA_CAMP_ACCOUNTS + ["물류창고"]
 
 auth = st.session_state["auth"]
 # 캠프로 로그인했을 때만 실제 소속 캠프로 제한한다. 관리자는 "캠프로 보기(my_camp)"를
