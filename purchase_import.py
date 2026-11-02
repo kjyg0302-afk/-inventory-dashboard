@@ -1,9 +1,10 @@
 """구매팀 E2E 엑셀(발주관리 시트)을 purchase_lines / purchase_receipts로 가져온다.
 
 앱이 구매 데이터의 원본이고, 엑셀은 전환 기간 동안 다시 올려서 바뀐 줄만 갱신하는 용도다.
-- 줄 매칭: 엑셀 관리번호가 파일 안에서 유일하고 DB의 엑셀 출신 줄과 같으면 그 줄. 아니면
-  지문(PO번호|제조사PN|품명|발주수량, 같은 지문이 여러 줄이면 #순번)으로 찾는다. 둘 다 없으면 새 줄 —
-  관리번호가 비었거나 중복이거나 이미 다른 줄이 쓰고 있으면 새 관리번호(L+일련번호)를 붙인다.
+- 줄 매칭: 먼저 지문(PO번호|제조사PN|품명|발주수량, 같은 지문이 여러 줄이면 #순번)으로 찾고, 못 찾은
+  줄은 엑셀 관리번호가 파일 안에서 유일하면 같은 번호의 DB 엑셀 출신 줄로 본다. 둘 다 없으면 새 줄.
+- 관리번호: 엑셀 번호가 파일 안에서 유일하면 DB도 그 번호로 맞춘다. 비었거나 중복이면 기존 번호를
+  유지하고, 그 번호를 엑셀의 다른 줄이 쓰거나 새 줄이면 새 관리번호(L+일련번호)를 붙인다.
 - DB엔 있는데 새 엑셀에 없는 줄은 지우지 않는다 (앱에서 만든 줄일 수도 있어서) — 개수만 알려준다.
 - 입고: 앱에서 입고를 등록한 줄은 엑셀의 입고값을 무시한다 (같은 입고를 두 번 세지 않게).
   그 외에는 엑셀의 실제 입고 수량·일자·입고처를 source='excel' 입고 기록 1건으로 맞춘다."""
@@ -118,6 +119,8 @@ def _locate_columns(header):
 
 
 PN_IS_SKU_SUPPLIER = "XZH"
+# 구매팀이 코드가 아직 없을 때 적는 값 — SKU·PN으로 쓰면 다른 품목끼리 묶이므로 빈 값으로 본다.
+NOT_YET_CODE = "생성전"
 
 
 def read_e2e_excel(file):
@@ -147,6 +150,9 @@ def read_e2e_excel(file):
             continue  # 빈 줄
         # 품목번호(SKU)는 대소문자 그대로 둔다 — 재고 데이터의 SKU도 GSPLs5002처럼 소문자가 섞여 있다.
         rec["qty"] = rec["qty"] or 0.0
+        for col in ("item_code", "mfr_pn"):
+            if rec[col] == NOT_YET_CODE:
+                rec[col] = None
         # XZH는 제조사 PN이 곧 우리 SKU다 — 엑셀 품목번호가 비어 있어도 SKU가 유지되게 PN으로 채운다.
         if rec["supplier"] == PN_IS_SKU_SUPPLIER and not rec["item_code"]:
             rec["item_code"] = rec["mfr_pn"]
@@ -205,37 +211,49 @@ def import_e2e(file, dry_run=False):
     excel_lines = db_lines[db_lines["source"] == "excel"]
     by_line_no = dict(zip(excel_lines["line_no"], excel_lines["id"]))
     by_fp = dict(zip(excel_lines["fingerprint"], excel_lines["id"]))
-    dup_in_file = {k for k, v in Counter(df["excel_line_no"].dropna()).items() if v > 1}
-    used_line_nos = set(db_lines["line_no"]) | set(df["excel_line_no"].dropna())
-    gen = _next_line_numbers(used_line_nos)
-    taken = set(db_lines["line_no"])
+    unique_nos = {k for k, v in Counter(df["excel_line_no"].dropna()).items() if v == 1}
+    gen = _next_line_numbers(set(db_lines["line_no"]) | unique_nos)
 
-    matched_ids, inserts, updates, renumbered = set(), [], [], []
+    matched_ids, inserts, updates, renumbered, relabels = set(), [], [], [], []
     current = db_lines.set_index("id")
     records = [{k: _norm_val(v) for k, v in rec.items()} for rec in df.to_dict("records")]
+    # 지문으로 먼저 찾는다 — 엑셀 번호가 바뀌어도 같은 줄을 놓치거나 남의 줄을 덮어쓰지 않게.
     for rec in records:
-        raw_no = rec["excel_line_no"]
-        line_id = None
-        if raw_no and raw_no not in dup_in_file and by_line_no.get(raw_no) not in (None, *matched_ids):
-            line_id = by_line_no[raw_no]
-        elif by_fp.get(rec["fingerprint"]) is not None and by_fp[rec["fingerprint"]] not in matched_ids:
-            line_id = by_fp[rec["fingerprint"]]
-
-        if line_id is not None:
-            matched_ids.add(line_id)
-            old = current.loc[line_id]
-            changed = {f: rec[f] for f in LINE_FIELDS if _norm_val(old[f]) != _norm_val(rec[f])}
-            if changed:
-                updates.append((line_id, changed))
+        line_id = by_fp.get(rec["fingerprint"])
+        if line_id is not None and line_id not in matched_ids:
             rec["_line_id"] = line_id
+            matched_ids.add(line_id)
+    for rec in records:
+        line_id = by_line_no.get(rec["excel_line_no"]) if rec["excel_line_no"] in unique_nos else None
+        if "_line_id" not in rec and line_id is not None and line_id not in matched_ids:
+            rec["_line_id"] = line_id
+            matched_ids.add(line_id)
+
+    # 이 파일에 없는 줄(앱에서 만든 PO 등)은 번호를 그대로 쓰므로 엑셀 번호가 겹치면 양보한다.
+    kept_nos = set(db_lines.loc[~db_lines["id"].isin(matched_ids), "line_no"])
+    for rec in records:
+        raw_no, line_id = rec["excel_line_no"], rec.get("_line_id")
+        old_no = current.loc[line_id, "line_no"] if line_id is not None else None
+        if raw_no in unique_nos and raw_no not in kept_nos:
+            line_no = raw_no
+        elif old_no and old_no not in unique_nos:
+            line_no = old_no
         else:
-            line_no = raw_no if raw_no and raw_no not in dup_in_file and raw_no not in taken else next(gen)
-            if line_no != raw_no:
-                renumbered.append({"엑셀 관리번호": raw_no or "(없음)", "새 관리번호": line_no,
-                                   "PO": rec["po_no"], "품명": rec["item_name"]})
-            taken.add(line_no)
-            rec["line_no"] = line_no
+            line_no = next(gen)
+            renumbered.append({"엑셀 관리번호": raw_no or "(없음)", "새 관리번호": line_no,
+                               "PO": rec["po_no"], "품명": rec["item_name"]})
+        rec["line_no"] = line_no
+
+        if line_id is None:
             inserts.append(rec)
+            continue
+        if line_no != old_no:
+            relabels.append((line_id, line_no, {"이전 관리번호": old_no, "새 관리번호": line_no,
+                                                "PO": rec["po_no"], "품명": rec["item_name"]}))
+        old = current.loc[line_id]
+        changed = {f: rec[f] for f in LINE_FIELDS if _norm_val(old[f]) != _norm_val(rec[f])}
+        if changed:
+            updates.append((line_id, changed))
 
     app_rcpt_lines = set(db_rcpt.loc[db_rcpt["source"] == "app", "line_id"])
     excel_rcpt = {r.line_id: r for r in db_rcpt[db_rcpt["source"] == "excel"].itertuples()}
@@ -261,8 +279,9 @@ def import_e2e(file, dry_run=False):
         "rows": len(df),
         "new_lines": len(inserts),
         "updated_lines": len(updates),
-        "unchanged_lines": len(df) - len(inserts) - len(updates),
+        "unchanged_lines": len(df) - len(inserts) - len({u[0] for u in updates} | {r[0] for r in relabels}),
         "renumbered": renumbered,
+        "relabeled": [r[2] for r in relabels],
         "receipt_changes": len(rcpt_changes),
         "kept_app_receipts": kept_app,
         "db_only_lines": int((~db_lines["id"].isin(matched_ids)).sum()),
@@ -272,6 +291,13 @@ def import_e2e(file, dry_run=False):
         return report
 
     with engine.begin() as c:
+        # 번호를 서로 맞바꾸는 줄이 있어도 unique 제약에 걸리지 않게 임시 번호를 거쳐 바꾼다.
+        for line_id, _no, _info in relabels:
+            c.execute(text("update purchase_lines set line_no = :n where id = :id"),
+                      {"n": f"~{int(line_id)}", "id": int(line_id)})
+        for line_id, line_no, _info in relabels:
+            c.execute(text("update purchase_lines set line_no = :n, updated_at = now() where id = :id"),
+                      {"n": line_no, "id": int(line_id)})
         new_ids = {}
         for rec in inserts:
             cols = ["line_no"] + LINE_FIELDS

@@ -512,6 +512,9 @@ def _render_admin():
             if preview["renumbered"]:
                 st.caption("관리번호가 없거나 중복이라 새 번호를 붙이는 줄:")
                 st.dataframe(pd.DataFrame(preview["renumbered"]), hide_index=True)
+            if preview["relabeled"]:
+                st.caption("엑셀에 맞춰 관리번호가 바뀌는 줄:")
+                st.dataframe(pd.DataFrame(preview["relabeled"]), hide_index=True)
             if st.button("반영", type="primary", key="e2e_apply", icon=":material/check:"):
                 r = import_e2e(up.getvalue())
                 load_purchase_lines.clear()

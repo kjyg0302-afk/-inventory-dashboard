@@ -138,10 +138,10 @@ def _render_incoming(item_code):
     if inc.empty:
         st.caption(":material/local_shipping: 이 품목은 구매 진행 중인 미입고 PO가 없어요.")
         return
-    first = inc.iloc[0]
+    earliest = inc["expected_on"].min()  # PO 승인일이 아직 없는 줄만 있으면 비어 있다
     st.info(
         f"**구매 입고 예정 {inc['open_qty'].sum():,.0f}개** · PO {inc['po_no'].nunique()}건 · "
-        f"가장 빠른 예상 입고일 {first['expected_on']:%Y-%m-%d}"
+        + (f"가장 빠른 예상 입고일 {earliest:%Y-%m-%d}" if pd.notna(earliest) else "예상 입고일 미정")
         + (" (지연 중)" if inc["overdue"].any() else ""),
         icon=":material/local_shipping:",
     )
