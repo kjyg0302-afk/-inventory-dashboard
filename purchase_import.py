@@ -117,6 +117,9 @@ def _locate_columns(header):
     return {col: pos[h] for col, h in COLUMNS.items()} | {"bl_no": due + 1, "import_decl_no": due + 2}
 
 
+PN_IS_SKU_SUPPLIER = "XZH"
+
+
 def read_e2e_excel(file):
     """엑셀(경로/바이트/파일객체)에서 정리된 줄 목록(DataFrame)을 만든다."""
     if isinstance(file, (bytes, bytearray)):
@@ -144,6 +147,9 @@ def read_e2e_excel(file):
             continue  # 빈 줄
         # 품목번호(SKU)는 대소문자 그대로 둔다 — 재고 데이터의 SKU도 GSPLs5002처럼 소문자가 섞여 있다.
         rec["qty"] = rec["qty"] or 0.0
+        # XZH는 제조사 PN이 곧 우리 SKU다 — 엑셀 품목번호가 비어 있어도 SKU가 유지되게 PN으로 채운다.
+        if rec["supplier"] == PN_IS_SKU_SUPPLIER and not rec["item_code"]:
+            rec["item_code"] = rec["mfr_pn"]
         price = rec["unit_price"]
         rec["amount"] = round(rec["qty"] * price, 4) if price is not None else None
         rec["amount_krw"] = (
