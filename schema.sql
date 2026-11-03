@@ -347,3 +347,51 @@ create table if not exists purchase_receipts (
     created_at timestamptz not null default now()
 );
 create index if not exists idx_purchase_receipts_line on purchase_receipts (line_id);
+
+-- 입고검사 (2026-11). 킥보드·자전거 본체를 QR(시리얼 번호)로 한 대씩 검사한다 (inspection.py).
+-- 검사 건 = 입고 리스트 한 묶음. 구매 줄(line_id)과 연결하면 OK 한 대마다 purchase_receipts에 입고 1개를 남긴다.
+create table if not exists inspection_batches (
+    id bigserial primary key,
+    name text not null,
+    device_type text not null,          -- 킥보드 / 자전거 (검사 항목은 app_data 'inspection_checklists')
+    model text,
+    po_no text,
+    line_id bigint references purchase_lines(id) on delete set null,
+    expected_qty integer,
+    status text not null default '진행',  -- 진행 / 완료
+    created_by text,
+    created_at timestamptz not null default now()
+);
+
+-- 입고 리스트의 시리얼 목록. 비어 있으면 아무 번호나 검사할 수 있다.
+create table if not exists inspection_expected_serials (
+    batch_id bigint not null references inspection_batches(id) on delete cascade,
+    serial text not null,
+    primary key (batch_id, serial)
+);
+
+-- 검사 기록. 같은 시리얼을 다시 검사(NG 후 재검사)하면 행이 하나 더 생기고 최신 행이 그 기기의 결과다.
+-- 나중에 기기 대장(기기 번호 관리)의 시작점이 된다.
+create table if not exists device_inspections (
+    id bigserial primary key,
+    batch_id bigint not null references inspection_batches(id) on delete cascade,
+    serial text not null,
+    result text not null,               -- OK / NG
+    items jsonb not null,               -- [{"item": "외관 검사", "result": "OK"}, ...]
+    note text,
+    inspector text not null,            -- 검사자 이름 (로그인 계정은 캠프 단위라 따로 받는다)
+    account text,                       -- 로그인 계정
+    receipt_id bigint references purchase_receipts(id) on delete set null,
+    inspected_at timestamptz not null default now()
+);
+create index if not exists idx_device_inspections_batch on device_inspections (batch_id);
+create index if not exists idx_device_inspections_serial on device_inspections (serial);
+
+-- 검사 사진. Storage 키 없이 DB에 넣으려고 긴 변 1280px JPEG로 줄여서 저장한다.
+create table if not exists inspection_photos (
+    id bigserial primary key,
+    inspection_id bigint not null references device_inspections(id) on delete cascade,
+    image bytea not null,
+    created_at timestamptz not null default now()
+);
+create index if not exists idx_inspection_photos_inspection on inspection_photos (inspection_id);
