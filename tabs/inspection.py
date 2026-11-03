@@ -118,23 +118,31 @@ INSPECTOR, INSPECTOR_W = "insp_inspector_name", "insp_inspector"
 
 
 def _inspector():
-    return str(st.session_state.get(INSPECTOR) or "").strip()
+    return str(st.session_state.get(INSPECTOR) or st.session_state.get(INSPECTOR_W) or "").strip()
 
 
 def _keep_inspector():
     st.session_state[INSPECTOR] = st.session_state.get(INSPECTOR_W)
 
 
+def _pick_inspector():
+    picked = st.session_state.get("insp_inspector_pick")
+    if picked:
+        st.session_state[INSPECTOR] = st.session_state[INSPECTOR_W] = picked
+    st.session_state["insp_inspector_pick"] = None
+
+
 def _render_inspector():
-    # 검사 단계 화면에서는 이 칸이 안 그려져서 Streamlit이 값을 지운다 → 따로 보관했다가 되돌려 놓는다.
+    # 휴대폰에서는 선택상자에 새 이름을 쳐도 목록에서 '추가'를 눌러야 들어가서 빈칸이 되기 쉽다 → 글자 입력칸 +
+    # 최근 검사자 버튼. 검사 단계 화면에서는 이 칸이 안 그려져 Streamlit이 값을 지우므로 따로 보관했다가 되돌린다.
     name = _inspector()
-    names = recent_inspectors()
-    if name and name not in names:
-        names = [name] + names
     if name and st.session_state.get(INSPECTOR_W) != name:
         st.session_state[INSPECTOR_W] = name
-    st.selectbox("검사자 이름", names, index=None, accept_new_options=True, key=INSPECTOR_W,
-                 placeholder="이름을 고르거나 새로 입력", on_change=_keep_inspector)
+    st.text_input("검사자 이름", key=INSPECTOR_W, placeholder="이름 입력", on_change=_keep_inspector)
+    others = [n for n in recent_inspectors(8) if n != name]
+    if others:
+        st.pills("최근 검사자", others, key="insp_inspector_pick", on_change=_pick_inspector,
+                 label_visibility="collapsed")
 
 
 def _start(bid, device_type, serial, force=False):
