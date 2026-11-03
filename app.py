@@ -35,6 +35,7 @@ import tabs.category
 import tabs.forecast
 import tabs.total
 import tabs.purchase
+import tabs.inbound
 import tabs.procurement
 import tabs.warehouse
 from rendering import (
@@ -92,6 +93,7 @@ TAB_DEFS = [
     ("warehouse", ":material/warehouse: 창고 현황"),
     ("purchase", ":material/local_shipping: 재고이관(창고<>캠프)"),
     ("procurement", ":material/shopping_cart: 구매·PO 관리"),
+    ("inbound", ":material/move_to_inbox: 미입고 현황"),
     ("total", ":material/inventory: 지바이크 전체 재고"),
 ]
 
@@ -585,6 +587,7 @@ _TAB_RENDERERS = {
     "total": tabs.total.render,
     "purchase": tabs.purchase.render,
     "procurement": tabs.procurement.render,
+    "inbound": tabs.inbound.render,
     "warehouse": tabs.warehouse.render,
 }
 _TAB_RENDERERS[active_key](ctx)

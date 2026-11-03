@@ -8,8 +8,8 @@ from datetime import datetime, timedelta
 import pandas as pd
 import streamlit as st
 
-from boxhero import get_boxhero_token, fetch_boxhero_items
 from formatting import KST
+from tabs.inbound import render_domestic_stock
 from vendors import list_vendors, create_vendor, delete_vendor
 from procurement import (
     STATUS_DONE,
@@ -109,29 +109,7 @@ def _render_open(lines, today):
             "상태 '생산 중'은 엑셀에 적혀 있던 진행 상태예요. 입고를 등록하면 수량 기준으로 바뀌어요."
         )
 
-    with st.expander("국내 재고 요약 (박스히어로 현재고 + 입고예정)", icon=":material/inventory_2:"):
-        dom = open_lines[open_lines["domestic"]]
-        if dom.empty:
-            st.caption("국내(대구·한국) 입고 예정인 미입고가 없어요.")
-            return
-        stock = {}
-        if get_boxhero_token():
-            try:
-                stock = {(it.get("sku") or "").strip().upper(): it.get("quantity", 0) for it in fetch_boxhero_items()}
-            except Exception:
-                st.caption("박스히어로 현재고를 불러오지 못했어요.")
-        key = dom["sku"].fillna(dom["mfr_pn"]).fillna(dom["item_name"])
-        g = dom.assign(key=key).groupby("key", as_index=False).agg(
-            품명=("item_name", "last"), 입고예정=("open_qty", "sum"), PO=("po_no", lambda s: ", ".join(sorted(set(s.dropna())))),
-            가장_이른_입고=("expected_on", "min"),
-        )
-        g["현재고"] = g["key"].str.upper().map(stock)
-        g["합계"] = g["현재고"] + g["입고예정"]
-        g["가장_이른_입고"] = g["가장_이른_입고"].dt.date
-        g = g.rename(columns={"key": "SKU / PN", "가장_이른_입고": "가장 이른 예상 입고일"})
-        st.dataframe(g[["SKU / PN", "품명", "현재고", "입고예정", "합계", "가장 이른 예상 입고일", "PO"]],
-                     hide_index=True, width="stretch")
-        st.caption("입고처가 대구·한국인 미입고만 더했어요. SKU가 없는 품목은 현재고를 알 수 없어 비어 있어요.")
+    render_domestic_stock(open_lines)
 
 
 # ---------------------------------------------------------------- PO 목록 + 상세
