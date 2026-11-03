@@ -391,6 +391,7 @@ create index if not exists idx_device_inspections_serial on device_inspections (
 create table if not exists inspection_photos (
     id bigserial primary key,
     inspection_id bigint not null references device_inspections(id) on delete cascade,
+    item text,                          -- 어느 검사 항목에서 찍은 사진인지
     image bytea not null,
     created_at timestamptz not null default now()
 );

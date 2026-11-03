@@ -92,7 +92,8 @@ export default function (component) {
         if (value && value.trim()) {
           if (navigator.vibrate) navigator.vibrate(120)
           stop("읽음: " + value.trim())
-          setTriggerValue("scanned", value.trim())
+          // 같은 QR을 다시 읽어도(재검사) 새 이벤트로 가도록 시각을 붙인다
+          setTriggerValue("scanned", { value: value.trim(), at: Date.now() })
           return
         }
       }
@@ -125,12 +126,22 @@ export default function (component) {
     msg.textContent = "QR을 화면 가운데에 비춰 주세요."
     loop()
   }
+
+  // 한 대 저장하고 돌아오면 바로 다음 스캔 (권한을 이미 허용한 브라우저에서만 켜진다)
+  if (component.data && component.data.autostart) btn.click()
 }
 """
 
 _SCANNER = st.components.v2.component("qr_scanner", html=_HTML, css=_CSS, js=_JS)
 
 
-def qr_scanner(key, on_scan):
-    """스캔 버튼 + 카메라. 읽히면 on_scan()이 불리고, 그 안에서 st.session_state[key].scanned로 값을 읽는다."""
-    return _SCANNER(key=key, on_scanned_change=on_scan)
+def qr_scanner(key, on_scan, autostart=False):
+    """스캔 버튼 + 카메라. 읽히면 on_scan(값)이 불린다.
+    autostart=True면 화면에 나오자마자 카메라를 켠다."""
+
+    def _changed():
+        event = st.session_state[key].scanned
+        if event:
+            on_scan(event["value"] if isinstance(event, dict) else event)
+
+    return _SCANNER(key=key, data={"autostart": autostart}, on_scanned_change=_changed)

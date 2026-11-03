@@ -1,6 +1,9 @@
 """입고검사 탭 — 휴대폰으로 QR(시리얼)을 스캔하고 항목별 OK/NG + 사진을 남긴다.
 검사는 물류창고 등 탭 권한이 있는 계정 누구나, 검사 건 만들기·취소·항목 관리는 관리자만."""
 
+import html
+import time
+
 import pandas as pd
 import streamlit as st
 
@@ -31,7 +34,8 @@ def _total(b):
 
 
 def _ng_items(items):
-    return ", ".join(it["item"] for it in (items or []) if it.get("result") == RESULT_NG)
+    return ", ".join(it["item"] + (f"({it['note']})" if it.get("note") else "")
+                     for it in (items or []) if it.get("result") == RESULT_NG)
 
 
 # ---------------- 관리자: 검사 건 만들기 ----------------
@@ -75,9 +79,10 @@ def _render_create(account):
         expected = qty or (len(serials) or None)
         if line_id and not qty:
             expected = expected or int(open_lines.loc[open_lines["id"] == line_id, "open_qty"].iloc[0])
-        create_batch(name.strip(), dtype, model.strip(), po_no.strip(), line_id, expected, serials, account)
+        new_id = create_batch(name.strip(), dtype, model.strip(), po_no.strip(), line_id, expected, serials, account)
         for k in ["insp_new_name", "insp_new_model", "insp_new_po", "insp_new_paste"]:
             st.session_state.pop(k, None)
+        st.session_state["insp_batch"] = new_id  # 방금 만든 검사 건을 바로 선택
         st.toast(f"검사 건을 만들었어요: {name.strip()}", icon=":material/check:")
         st.rerun()
 
@@ -96,89 +101,203 @@ def _render_checklist_admin():
     st.caption("바꾼 항목은 다음 검사부터 적용돼요. 이미 저장된 검사는 그때 항목 그대로 남아요.")
 
 
-# ---------------- 검사하기 ----------------
+# ---------------- 검사하기 (한 항목씩 넘어가는 화면) ----------------
+# st.session_state[WIZ] = {"bid", "serial", "checklist", "items": [{item, result, note}], "photos": [(item, bytes)],
+#                          "token": 화면 입력칸 구분용, "ng": NG 내용을 적는 중인지}
+WIZ, MSG, LAST, AUTOSCAN = "insp_wiz", "insp_msg", "insp_last", "insp_autoscan"
 
-def _on_scan(bid):
-    value = clean_serial(st.session_state[f"insp_scanner_{bid}"].scanned)
+_BIG_CSS = """<style>
+.st-key-insp_wiz_ok button, .st-key-insp_wiz_ng button, .st-key-insp_wiz_ng_ok button { min-height: 4.5rem; }
+.st-key-insp_wiz_ok button p, .st-key-insp_wiz_ng button p, .st-key-insp_wiz_ng_ok button p {
+  font-size: 1.6rem; font-weight: 700; }
+.insp-item { font-size: 2.2rem; font-weight: 800; text-align: center; margin: 0.8rem 0 1.2rem; }
+</style>"""
+
+
+INSPECTOR, INSPECTOR_W = "insp_inspector_name", "insp_inspector"
+
+
+def _inspector():
+    return str(st.session_state.get(INSPECTOR) or "").strip()
+
+
+def _keep_inspector():
+    st.session_state[INSPECTOR] = st.session_state.get(INSPECTOR_W)
+
+
+def _render_inspector():
+    # 검사 단계 화면에서는 이 칸이 안 그려져서 Streamlit이 값을 지운다 → 따로 보관했다가 되돌려 놓는다.
+    name = _inspector()
+    names = recent_inspectors()
+    if name and name not in names:
+        names = [name] + names
+    if name and st.session_state.get(INSPECTOR_W) != name:
+        st.session_state[INSPECTOR_W] = name
+    st.selectbox("검사자 이름", names, index=None, accept_new_options=True, key=INSPECTOR_W,
+                 placeholder="이름을 고르거나 새로 입력", on_change=_keep_inspector)
+
+
+def _start(bid, device_type, serial, force=False):
+    """시리얼로 검사를 시작한다. 재검사·목록 밖 번호면 경고만 띄우고, force(검사 시작 버튼)일 때 시작."""
+    serial = clean_serial(serial)
+    st.session_state.pop(MSG, None)
+    if not serial:
+        return
+    if not _inspector():
+        st.session_state[MSG] = ("error", "검사자 이름을 먼저 골라 주세요.")
+        return
+    hist = serial_history(serial)
+    passed = hist[hist["result"] == RESULT_OK]
+    if not passed.empty:
+        p = passed.iloc[0]
+        st.session_state[MSG] = (
+            "error", f"**{serial}**은(는) 이미 통과했어요 — {p['batch_name']}, {_fmt_time(p['inspected_at'])}, {p['inspector']}")
+        return
+    warns = []
+    if not hist.empty:
+        h = hist.iloc[0]
+        warns.append(f"재검사예요. 지난 검사 {_fmt_time(h['inspected_at'])} NG — {_ng_items(h['items']) or '-'}")
+    listed = expected_serials(bid)
+    if listed and serial not in listed:
+        warns.append(f"**{serial}**은(는) 이 검사 건의 시리얼 목록에 없어요.")
+    if warns and not force:
+        st.session_state[MSG] = ("warning", "  \n".join(warns + ["맞으면 **검사 시작**을 눌러 주세요."]))
+        return
+    st.session_state[WIZ] = {
+        "bid": bid, "serial": serial, "checklist": load_checklists()[device_type], "items": [], "photos": [],
+        "token": time.time_ns(), "ng": False,
+    }
+
+
+def _on_scan(bid, device_type, raw):
+    value = clean_serial(raw)
     if value:
         st.session_state[_k("serial", bid)] = value
+        _start(bid, device_type, value)
 
 
-def _all_ok(bid, checklist):
-    for i in range(len(checklist)):
-        st.session_state[_k(f"item{i}", bid)] = RESULT_OK
+def _photo_key(wiz):
+    return f"insp_wiz_photo_{wiz['token']}_{len(wiz['items'])}"
 
 
-def _render_inspect(batch, checklist, account):
-    bid = int(batch["id"])
-    names = recent_inspectors()
-    inspector = st.selectbox(
-        "검사자 이름", names, index=None, accept_new_options=True, key="insp_inspector",
-        placeholder="이름을 고르거나 새로 입력",
-    )
+def _note_key(wiz):
+    return f"insp_wiz_note_{wiz['token']}_{len(wiz['items'])}"
 
-    qr_scanner(f"insp_scanner_{bid}", lambda: _on_scan(bid))
-    serial = clean_serial(st.text_input(
-        "시리얼 번호", key=_k("serial", bid),
-        placeholder="QR 스캔 · 블루투스 스캐너 · 직접 입력",
-    ))
 
-    listed = expected_serials(bid)
-    off_list = False
-    if serial:
-        hist = serial_history(serial)
-        passed = hist[hist["result"] == RESULT_OK]
-        if not passed.empty:
-            p = passed.iloc[0]
-            st.error(f"**{serial}**은(는) 이미 통과했어요 — {p['batch_name']}, {_fmt_time(p['inspected_at'])}, {p['inspector']}")
+def _answer(result, batch, account):
+    wiz = st.session_state[WIZ]
+    item = wiz["checklist"][len(wiz["items"])]
+    note = ""
+    if result == RESULT_NG:
+        note = str(st.session_state.get(_note_key(wiz)) or "").strip()
+        if not note:
+            st.session_state[MSG] = ("error", "NG 내용을 적어 주세요.")
             return
-        if not hist.empty:
-            h = hist.iloc[0]
-            st.warning(f"재검사예요. 지난 검사 {_fmt_time(h['inspected_at'])} NG ({_ng_items(h['items']) or '-'}) · {h['note'] or ''}")
-        if listed and serial not in listed:
-            off_list = True
-            st.warning(f"**{serial}**은(는) 이 검사 건의 시리얼 목록에 없어요.")
+    wiz["photos"] += [(item, f.getvalue()) for f in st.session_state.get(_photo_key(wiz)) or []]
+    wiz["items"].append({"item": item, "result": result, "note": note})
+    wiz["ng"] = False
+    st.session_state.pop(MSG, None)
+    if len(wiz["items"]) == len(wiz["checklist"]):
+        _finish(batch, account)
 
-    st.button("전부 OK", key=_k("allok", bid), on_click=_all_ok, args=(bid, checklist), icon=":material/done_all:")
-    results = []
-    for i, item in enumerate(checklist):
-        results.append(st.segmented_control(item, [RESULT_OK, RESULT_NG], key=_k(f"item{i}", bid)))
-    any_ng = RESULT_NG in results
-    note = st.text_input("메모" + (" (NG 내용 필수)" if any_ng else ""), key=_k("note", bid))
-    photos = st.file_uploader(
-        "사진 (필요할 때 · 휴대폰에서는 카메라로 바로 찍을 수 있어요)", type=["jpg", "jpeg", "png", "webp"],
-        accept_multiple_files=True, key=_k("photos", bid),
-    )
-    confirm_off = st.checkbox("목록에 없지만 저장", key=_k("offlist", bid)) if off_list else True
 
-    if st.button("저장", type="primary", key=_k("save", bid), width="stretch", icon=":material/save:"):
-        problems = []
-        if not inspector or not str(inspector).strip():
-            problems.append("검사자 이름을 골라 주세요.")
-        if not serial:
-            problems.append("시리얼 번호를 스캔하거나 입력해 주세요.")
-        if None in results:
-            problems.append("OK/NG를 고르지 않은 항목: " + ", ".join(c for c, r in zip(checklist, results) if r is None))
-        if any_ng and not note.strip():
-            problems.append("NG 항목이 있으면 메모를 적어 주세요.")
-        if not confirm_off:
-            problems.append("목록에 없는 시리얼이에요. 맞으면 '목록에 없지만 저장'에 체크해 주세요.")
-        if problems:
-            for p in problems:
-                st.error(p)
-            return
-        items = [{"item": c, "result": r} for c, r in zip(checklist, results)]
-        try:
-            _, result = save_inspection(batch, serial, items, note.strip(), str(inspector).strip(), account,
-                                        [f.getvalue() for f in photos or []])
-        except ValueError as e:
-            st.error(str(e))
-            return
-        st.session_state[N_KEY] = st.session_state.get(N_KEY, 0) + 1
-        msg = f"{serial} 저장 — {result}" + (" (입고 처리)" if result == RESULT_OK else "")
-        st.toast(msg, icon=":material/check_circle:" if result == RESULT_OK else ":material/error:")
-        st.rerun()
+def _finish(batch, account):
+    wiz = st.session_state.pop(WIZ)
+    notes = "; ".join(f"{it['item']}: {it['note']}" for it in wiz["items"] if it["note"])
+    try:
+        iid, result = save_inspection(batch, wiz["serial"], wiz["items"], notes, _inspector(), account, wiz["photos"])
+    except ValueError as e:
+        st.session_state[MSG] = ("error", str(e))
+        return
+    st.session_state[LAST] = {"id": iid, "bid": wiz["bid"], "serial": wiz["serial"], "result": result,
+                              "ng": _ng_items(wiz["items"])}
+    st.session_state[N_KEY] = st.session_state.get(N_KEY, 0) + 1
+    st.session_state[AUTOSCAN] = True
 
+
+def _set_ng(on):
+    st.session_state[WIZ]["ng"] = on
+    st.session_state.pop(MSG, None)
+
+
+def _back():
+    wiz = st.session_state[WIZ]
+    st.session_state.pop(MSG, None)
+    if wiz["ng"]:
+        wiz["ng"] = False
+    elif wiz["items"]:
+        it = wiz["items"].pop()
+        wiz["photos"] = [p for p in wiz["photos"] if p[0] != it["item"]]
+
+
+def _quit():
+    st.session_state.pop(WIZ, None)
+    st.session_state.pop(MSG, None)
+
+
+def _undo_last():
+    delete_inspection(st.session_state.pop(LAST)["id"])
+    st.toast("방금 저장한 검사를 취소했어요.", icon=":material/undo:")
+
+
+def _show_msg():
+    msg = st.session_state.get(MSG)
+    if msg:
+        getattr(st, msg[0])(msg[1])
+    return msg
+
+
+def _render_step(batch, account, wiz):
+    step, total = len(wiz["items"]), len(wiz["checklist"])
+    item = wiz["checklist"][step]
+    st.caption(f"시리얼 **{wiz['serial']}** · 검사자 {_inspector()} · {step + 1} / {total}")
+    st.progress(step / total)
+    st.markdown(f'<div class="insp-item">{html.escape(item)}</div>', unsafe_allow_html=True)
+    _show_msg()
+    if wiz["ng"]:
+        st.text_input("NG 내용 (필수)", key=_note_key(wiz), placeholder="예: 앞 펜더 스크래치")
+        st.button("NG로 기록하고 다음", type="primary", width="stretch", key="insp_wiz_ng_ok",
+                  on_click=_answer, args=(RESULT_NG, batch, account))
+    else:
+        st.button("OK", type="primary", width="stretch", key="insp_wiz_ok", icon=":material/check:",
+                  on_click=_answer, args=(RESULT_OK, batch, account))
+        st.button("NG", width="stretch", key="insp_wiz_ng", icon=":material/close:", on_click=_set_ng, args=(True,))
+    st.file_uploader(f"{item} 사진 (필요할 때 · 카메라로 바로 찍을 수 있어요)", type=["jpg", "jpeg", "png", "webp"],
+                     accept_multiple_files=True, key=_photo_key(wiz))
+    if wiz["items"]:
+        st.caption("  ·  ".join(f"{it['item']} {it['result']}" for it in wiz["items"]))
+    b1, b2 = st.columns(2)
+    b1.button("← 이전", key="insp_wiz_back", on_click=_back, disabled=not (wiz["items"] or wiz["ng"]),
+              width="stretch")
+    b2.button("검사 그만두기", key="insp_wiz_quit", on_click=_quit, width="stretch")
+
+
+def _render_inspect(batch, account):
+    bid, dtype = int(batch["id"]), batch["device_type"]
+    st.markdown(_BIG_CSS, unsafe_allow_html=True)
+    wiz = st.session_state.get(WIZ)
+    if wiz and wiz["bid"] == bid:
+        _render_step(batch, account, wiz)
+        return
+
+    _render_inspector()
+    last =st.session_state.get(LAST)
+    if last and last["bid"] == bid:
+        c1, c2 = st.columns([3, 1], vertical_alignment="center")
+        if last["result"] == RESULT_OK:
+            c1.success(f"{last['serial']} OK — 입고 처리했어요", icon=":material/check_circle:")
+        else:
+            c1.error(f"{last['serial']} NG ({last['ng']}) — 기록했어요", icon=":material/error:")
+        c2.button("방금 것 취소", key="insp_undo", on_click=_undo_last, width="stretch")
+
+    qr_scanner(f"insp_scanner_{bid}", lambda raw: _on_scan(bid, dtype, raw), autostart=st.session_state.pop(AUTOSCAN, False))
+    serial_key = _k("serial", bid)
+    serial = st.text_input("시리얼 번호", key=serial_key, placeholder="QR 스캔 · 블루투스 스캐너 · 직접 입력 후 Enter",
+                           on_change=lambda: _start(bid, dtype, st.session_state[serial_key]))
+    msg = _show_msg()
+    if clean_serial(serial) and (not msg or msg[0] == "warning"):
+        st.button("검사 시작", type="primary", width="stretch", key=_k("start", bid),
+                  on_click=_start, args=(bid, dtype, serial, True))
 
 # ---------------- 기록 ----------------
 
@@ -193,7 +312,7 @@ def _render_records(batch, checklist, is_admin):
         view = df if flt in (None, "전체") else df[df["result"] == flt]
         table = pd.DataFrame({
             "검사 일시": view["inspected_at"].map(_fmt_time), "시리얼": view["serial"], "결과": view["result"],
-            "NG 항목": view["items"].map(_ng_items), "메모": view["note"].fillna(""),
+            "NG 항목 (내용)": view["items"].map(_ng_items),
             "검사자": view["inspector"], "사진": view["photos"],
         })
         st.dataframe(table, hide_index=True, width="stretch",
@@ -211,13 +330,12 @@ def _render_records(batch, checklist, is_admin):
                 pick = st.selectbox("검사", list(opts), format_func=opts.get, key=f"insp_pick_{bid}")
                 row = with_detail[with_detail["id"] == pick].iloc[0]
                 st.markdown("  \n".join(
-                    f"{':red[NG]' if it['result'] == RESULT_NG else ':green[OK]'} {it['item']}" for it in row["items"]
+                    f"{':red[NG]' if it['result'] == RESULT_NG else ':green[OK]'} {it['item']}"
+                    + (f" — {it['note']}" if it.get("note") else "") for it in row["items"]
                 ))
-                if row["note"]:
-                    st.caption(f"메모: {row['note']}")
                 imgs = load_photos(pick)
                 if imgs:
-                    st.image(imgs, width=320)
+                    st.image([img for _, img in imgs], caption=[item for item, _ in imgs], width=320)
 
     listed = expected_serials(bid)
     if listed:
@@ -292,10 +410,9 @@ def render(ctx):
     checklist = load_checklists()[batch["device_type"]]
 
     total = _total(batch)
-    m1, m2, m3 = st.columns(3)
-    m1.metric("검사", f"{batch['inspected']:,}" + (f" / {total:,}대" if total else "대"), border=True)
-    m2.metric("OK (입고)", f"{batch['ok']:,}대", border=True)
-    m3.metric("NG", f"{batch['ng']:,}대", border=True)
+    # 휴대폰에서 검사 화면이 밀리지 않게 카드 대신 한 줄로
+    st.markdown(f"**검사 {batch['inspected']:,}" + (f" / {total:,}대**" if total else "대**")
+                + f" · :green[OK(입고) {batch['ok']:,}] · :red[NG {batch['ng']:,}]")
     if total:
         st.progress(min(batch["inspected"] / total, 1.0))
     extra = []
@@ -310,7 +427,7 @@ def render(ctx):
 
     if batch["status"] == STATUS_OPEN:
         st.subheader("검사하기", divider="gray")
-        _render_inspect(batch, checklist, account)
+        _render_inspect(batch, account)
     st.subheader("검사 기록", divider="gray")
     _render_records(batch, checklist, is_admin)
 
@@ -323,6 +440,6 @@ def render(ctx):
             else:
                 st.dataframe(pd.DataFrame({
                     "검사 일시": h["inspected_at"].map(_fmt_time), "검사 건": h["batch_name"], "결과": h["result"],
-                    "NG 항목": h["items"].map(_ng_items), "메모": h["note"].fillna(""), "검사자": h["inspector"],
+                    "NG 항목 (내용)": h["items"].map(_ng_items), "검사자": h["inspector"],
                     "사진": h["photos"],
                 }), hide_index=True, width="stretch")

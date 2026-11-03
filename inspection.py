@@ -205,10 +205,10 @@ def shrink_photo(raw):
 
 
 def save_inspection(batch, serial, items, note, inspector, account, photos):
-    """검사 1건 저장. items = [{"item", "result"}], photos = 원본 바이트 목록.
+    """검사 1건 저장. items = [{"item", "result", "note"}], photos = [(항목, 원본 바이트)].
     이미 OK로 통과한 시리얼이면 저장하지 않고 ValueError. 반환: (검사 id, 결과)."""
     result = RESULT_NG if any(it["result"] == RESULT_NG for it in items) else RESULT_OK
-    images = [shrink_photo(p) for p in photos]
+    images = [(item, shrink_photo(raw)) for item, raw in photos]
     conn = get_db_connection()
     with conn.session as s:
         # 두 사람이 같은 번호를 동시에 저장해도 한 번만 통과하도록 시리얼 단위로 잠근다.
@@ -241,9 +241,9 @@ def save_inspection(batch, serial, items, note, inspector, account, photos):
             {"b": int(batch["id"]), "s": serial, "r": result, "items": json.dumps(items, ensure_ascii=False),
              "note": note or None, "insp": inspector, "acc": account, "rc": receipt_id},
         ).scalar()
-        for img in images:
-            s.execute(text("insert into inspection_photos (inspection_id, image) values (:i, :img)"),
-                      {"i": iid, "img": img})
+        for item, img in images:
+            s.execute(text("insert into inspection_photos (inspection_id, item, image) values (:i, :item, :img)"),
+                      {"i": iid, "item": item, "img": img})
         s.commit()
     if receipt_id:
         load_purchase_lines.clear()
@@ -264,12 +264,13 @@ def delete_inspection(inspection_id):
 
 
 def load_photos(inspection_id):
+    """[(항목, jpeg 바이트)]."""
     # conn.query는 결과를 pickle로 캐시하는데 bytea(memoryview)는 pickle이 안 돼서 세션으로 직접 읽는다.
     conn = get_db_connection()
     with conn.session as s:
-        rows = s.execute(text("select image from inspection_photos where inspection_id = :i order by id"),
-                         {"i": int(inspection_id)}).scalars().all()
-    return [bytes(b) for b in rows]
+        rows = s.execute(text("select item, image from inspection_photos where inspection_id = :i order by id"),
+                         {"i": int(inspection_id)}).all()
+    return [(item or "", bytes(img)) for item, img in rows]
 
 
 def results_xlsx(batch, df, checklist):
@@ -277,7 +278,7 @@ def results_xlsx(batch, df, checklist):
     latest = df.sort_values("inspected_at").drop_duplicates("serial", keep="last")
     rows = []
     for r in latest.itertuples():
-        res = {it["item"]: it["result"] for it in (r.items or [])}
+        res = {it["item"]: it["result"] + (f" ({it['note']})" if it.get("note") else "") for it in (r.items or [])}
         rows.append({
             "시리얼": r.serial, "결과": r.result, **{c: res.get(c, "") for c in checklist},
             "메모": r.note or "", "검사자": r.inspector,
