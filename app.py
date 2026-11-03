@@ -593,7 +593,10 @@ _TAB_RENDERERS = {
     "inspection": tabs.inspection.render,
     "warehouse": tabs.warehouse.render,
 }
-_TAB_RENDERERS[active_key](ctx)
+# 탭마다 다른 key의 컨테이너에 그린다. Streamlit은 새 화면이 다 그려질 때까지 같은 자리의 이전 내용을
+# 흐리게 남겨 두는데, 컨테이너가 바뀌면 이전 탭 내용(예: 개요 그래프)이 바로 사라진다.
+with st.container(key=f"tab_body_{active_key}"):
+    _TAB_RENDERERS[active_key](ctx)
 
 st.divider()
 st.caption("업로드한 데이터는 이 앱에 접속하는 모든 사람에게 공유됩니다. 재고 엑셀/사용량 JSON을 다시 올리면 바로 반영돼요.")
