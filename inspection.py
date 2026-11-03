@@ -9,6 +9,7 @@ import io
 import json
 import re
 from datetime import datetime
+from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 from PIL import Image, ImageOps
@@ -37,9 +38,18 @@ def save_checklist(device_type, items):
     save_data("inspection_checklists", lists)
 
 
+# 기기 QR은 주소 형태다: https://open.gbike.io/?b=08201632498 → 기기 번호는 b 값.
+QR_SERIAL_PARAMS = ("b", "sn", "serial", "id")
+
+
 def clean_serial(raw):
-    """스캔·입력값 정리: 앞뒤 공백 제거, 엑셀에서 숫자로 읽혀 붙은 '.0' 제거."""
+    """스캔·입력값 정리: 기기 QR 주소면 번호(b=…)만 꺼내고, 앞뒤 공백과 엑셀 숫자의 '.0'을 뗀다."""
     s = str(raw or "").strip()
+    if re.match(r"https?://", s, re.I):
+        url = urlparse(s)
+        query = parse_qs(url.query)
+        hit = next((query[k][0] for k in QR_SERIAL_PARAMS if query.get(k)), None)
+        s = (hit or url.path.rstrip("/").rsplit("/", 1)[-1] or s).strip()
     return s[:-2] if re.fullmatch(r"\d+\.0", s) else s
 
 
