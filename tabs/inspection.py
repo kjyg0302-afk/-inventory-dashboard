@@ -9,7 +9,7 @@ import streamlit as st
 
 from formatting import KST
 from inspection import (
-    DEVICE_TYPES, RESULT_NG, RESULT_OK, STATUS_DONE, STATUS_OPEN,
+    DEVICE_TYPES, PHOTO_TYPES, RESULT_NG, RESULT_OK, STATUS_DONE, STATUS_OPEN,
     add_serials, clean_serial, create_batch, delete_batch, delete_inspection, expected_serials, list_batches,
     list_inspections, load_checklists, load_photos, parse_serials, recent_inspectors, results_xlsx, save_checklist,
     save_inspection, serial_history, set_batch_status,
@@ -218,7 +218,7 @@ def _finish(batch, account):
         st.session_state[MSG] = ("error", str(e))
         return
     st.session_state[LAST] = {"id": iid, "bid": wiz["bid"], "serial": wiz["serial"], "result": result,
-                              "ng": _ng_items(wiz["items"])}
+                              "ng": _ng_items(wiz["items"]), "photos": len(wiz["photos"])}
     st.session_state[N_KEY] = st.session_state.get(N_KEY, 0) + 1
     st.session_state[AUTOSCAN] = True
 
@@ -270,8 +270,13 @@ def _render_step(batch, account, wiz):
         st.button("OK", type="primary", width="stretch", key="insp_wiz_ok", icon=":material/check:",
                   on_click=_answer, args=(RESULT_OK, batch, account))
         st.button("NG", width="stretch", key="insp_wiz_ng", icon=":material/close:", on_click=_set_ng, args=(True,))
-    st.file_uploader(f"{item} 사진 (필요할 때 · 카메라로 바로 찍을 수 있어요)", type=["jpg", "jpeg", "png", "webp"],
-                     accept_multiple_files=True, key=_photo_key(wiz))
+    files = st.file_uploader(f"{item} 사진 (필요할 때 · 카메라로 바로 찍을 수 있어요)", type=PHOTO_TYPES,
+                             accept_multiple_files=True, key=_photo_key(wiz))
+    if files:
+        st.success(f"사진 {len(files)}장 첨부됨 — OK/NG를 누르면 같이 저장돼요", icon=":material/photo_camera:")
+    saved = len(wiz["photos"])
+    if saved:
+        st.caption(f"앞 항목에서 첨부한 사진 {saved}장")
     if wiz["items"]:
         st.caption("  ·  ".join(f"{it['item']} {it['result']}" for it in wiz["items"]))
     b1, b2 = st.columns(2)
@@ -292,10 +297,11 @@ def _render_inspect(batch, account):
     last =st.session_state.get(LAST)
     if last and last["bid"] == bid:
         c1, c2 = st.columns([3, 1], vertical_alignment="center")
+        pics = f" · 사진 {last['photos']}장" if last.get("photos") else ""
         if last["result"] == RESULT_OK:
-            c1.success(f"{last['serial']} OK — 입고 처리했어요", icon=":material/check_circle:")
+            c1.success(f"{last['serial']} OK — 입고 처리했어요{pics}", icon=":material/check_circle:")
         else:
-            c1.error(f"{last['serial']} NG ({last['ng']}) — 기록했어요", icon=":material/error:")
+            c1.error(f"{last['serial']} NG ({last['ng']}) — 기록했어요{pics}", icon=":material/error:")
         c2.button("방금 것 취소", key="insp_undo", on_click=_undo_last, width="stretch")
 
     qr_scanner(f"insp_scanner_{bid}", lambda raw: _on_scan(bid, dtype, raw), autostart=st.session_state.pop(AUTOSCAN, False))

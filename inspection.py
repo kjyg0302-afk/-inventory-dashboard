@@ -25,6 +25,15 @@ DEFAULT_CHECKLIST = ["외관 검사", "IoT 작동 검사", "타이어 공기압 
 RESULT_OK, RESULT_NG = "OK", "NG"
 STATUS_OPEN, STATUS_DONE = "진행", "완료"
 PHOTO_MAX_SIDE = 1280
+# 갤럭시·아이폰 카메라는 설정에 따라 HEIC로 저장한다 → 업로드에서 받아서 JPEG로 바꾼다.
+PHOTO_TYPES = ["jpg", "jpeg", "png", "webp", "heic", "heif"]
+
+try:
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+except ImportError:
+    pass
 
 
 def load_checklists():
