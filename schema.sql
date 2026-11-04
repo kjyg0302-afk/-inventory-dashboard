@@ -396,3 +396,21 @@ create table if not exists inspection_photos (
     created_at timestamptz not null default now()
 );
 create index if not exists idx_inspection_photos_inspection on inspection_photos (inspection_id);
+
+-- 보안 (2026-11-04): public 스키마의 모든 표에 RLS를 켠다. Supabase 공개 키(anon/authenticated)로
+-- 들어오는 REST 접근은 정책이 없어 전부 막히고, 앱은 postgres(RLS 우회)로 접속해 영향 없다.
+-- readonly_viewer는 SELECT 권한이 있는 표만 읽기 정책으로 그대로 읽는다.
+-- 새 표를 만든 뒤 이 블록을 다시 실행할 것 (여러 번 실행해도 안전).
+do $$
+declare t record;
+begin
+  for t in select c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+           where n.nspname = 'public' and c.relkind = 'r' loop
+    execute format('alter table public.%I enable row level security', t.relname);
+    if has_table_privilege('readonly_viewer', format('public.%I', t.relname), 'select')
+       and not exists (select 1 from pg_policies where schemaname = 'public' and tablename = t.relname
+                       and policyname = 'readonly_viewer_select') then
+      execute format('create policy readonly_viewer_select on public.%I for select to readonly_viewer using (true)', t.relname);
+    end if;
+  end loop;
+end $$;
