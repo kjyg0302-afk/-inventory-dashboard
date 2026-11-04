@@ -56,7 +56,7 @@ from transfers import (
 )
 from usage_data import ingest_raw_usage, refresh_usage_summary, save_usage_facts
 from app_data import (
-    load_data,
+    load_shared,
     save_data,
     backup_data_before_overwrite,
     load_camp_tab_permissions,
@@ -175,13 +175,9 @@ if not st.session_state.get("auth"):
 
 # ---------------- 세션 상태 로드 ----------------
 
-if "inventory" not in st.session_state:
-    st.session_state.inventory = load_data("inventory")
-if "usage" not in st.session_state:
-    st.session_state.usage = load_data("usage")
-
-data = st.session_state.inventory
-usage = st.session_state.usage
+# 서버 전체가 사본 하나를 같이 쓴다 (app_data.load_shared 참고).
+data = load_shared("inventory")
+usage = load_shared("usage")
 
 
 # ---------------- 헤더 ----------------
@@ -220,7 +216,6 @@ with col_upload1:
             parsed = apply_boxhero_names_to_inventory(parsed)
             backup_data_before_overwrite("inventory", "재고 엑셀 업로드")
             save_data("inventory", parsed)
-            st.session_state.inventory = parsed
             data = parsed
             st.session_state["_inv_file_id"] = inv_file.file_id
             st.success(f"업데이트 완료 · 품목 {len(parsed['items']):,}개 · 캠프 {len(parsed['campsOrder'])}곳", icon=":material/check_circle:")
@@ -235,7 +230,6 @@ with col_upload1:
                 parsed = apply_boxhero_names_to_inventory(parsed)
                 backup_data_before_overwrite("inventory", "태블로 동기화")
                 save_data("inventory", parsed)
-                st.session_state.inventory = parsed
                 data = parsed
                 st.success(f"동기화 완료 · 품목 {len(parsed['items']):,}개 · 캠프 {len(parsed['campsOrder'])}곳", icon=":material/check_circle:")
             except Exception as e:
@@ -270,7 +264,6 @@ with col_upload2:
                         _, facts_df = apply_boxhero_names_to_usage({}, facts_df)
                         save_usage_facts(facts_df)
                         parsed_usage = refresh_usage_summary("사용량 데이터 업로드 (태블로 양식)")
-            st.session_state.usage = parsed_usage
             usage = parsed_usage
             st.session_state["_usage_file_id"] = usage_file.file_id
             if report:
@@ -500,7 +493,6 @@ st.divider()
 
 # ---------------- 파생 데이터 계산 ----------------
 
-@st.cache_data(show_spinner=False)
 def compute_camp_totals(data):
     totals = {c: {"qty": 0, "amt": 0} for c in data["campsOrder"]}
     for it in data["items"]:
