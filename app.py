@@ -36,7 +36,6 @@ import tabs.forecast
 import tabs.total
 import tabs.purchase
 import tabs.inbound
-import tabs.inspection
 import tabs.procurement
 import tabs.warehouse
 from rendering import (
@@ -56,7 +55,7 @@ from transfers import (
 )
 from usage_data import ingest_raw_usage, refresh_usage_summary, save_usage_facts
 from app_data import (
-    load_shared,
+    load_data,
     save_data,
     backup_data_before_overwrite,
     load_camp_tab_permissions,
@@ -95,7 +94,6 @@ TAB_DEFS = [
     ("purchase", ":material/local_shipping: 재고이관(창고<>캠프)"),
     ("procurement", ":material/shopping_cart: 구매·PO 관리"),
     ("inbound", ":material/move_to_inbox: 미입고 현황"),
-    ("inspection", ":material/fact_check: 입고검사"),
     ("total", ":material/inventory: 지바이크 전체 재고"),
 ]
 
@@ -175,9 +173,13 @@ if not st.session_state.get("auth"):
 
 # ---------------- 세션 상태 로드 ----------------
 
-# 서버 전체가 사본 하나를 같이 쓴다 (app_data.load_shared 참고).
-data = load_shared("inventory")
-usage = load_shared("usage")
+if "inventory" not in st.session_state:
+    st.session_state.inventory = load_data("inventory")
+if "usage" not in st.session_state:
+    st.session_state.usage = load_data("usage")
+
+data = st.session_state.inventory
+usage = st.session_state.usage
 
 
 # ---------------- 헤더 ----------------
@@ -216,6 +218,7 @@ with col_upload1:
             parsed = apply_boxhero_names_to_inventory(parsed)
             backup_data_before_overwrite("inventory", "재고 엑셀 업로드")
             save_data("inventory", parsed)
+            st.session_state.inventory = parsed
             data = parsed
             st.session_state["_inv_file_id"] = inv_file.file_id
             st.success(f"업데이트 완료 · 품목 {len(parsed['items']):,}개 · 캠프 {len(parsed['campsOrder'])}곳", icon=":material/check_circle:")
@@ -230,6 +233,7 @@ with col_upload1:
                 parsed = apply_boxhero_names_to_inventory(parsed)
                 backup_data_before_overwrite("inventory", "태블로 동기화")
                 save_data("inventory", parsed)
+                st.session_state.inventory = parsed
                 data = parsed
                 st.success(f"동기화 완료 · 품목 {len(parsed['items']):,}개 · 캠프 {len(parsed['campsOrder'])}곳", icon=":material/check_circle:")
             except Exception as e:
@@ -264,6 +268,7 @@ with col_upload2:
                         _, facts_df = apply_boxhero_names_to_usage({}, facts_df)
                         save_usage_facts(facts_df)
                         parsed_usage = refresh_usage_summary("사용량 데이터 업로드 (태블로 양식)")
+            st.session_state.usage = parsed_usage
             usage = parsed_usage
             st.session_state["_usage_file_id"] = usage_file.file_id
             if report:
@@ -493,6 +498,7 @@ st.divider()
 
 # ---------------- 파생 데이터 계산 ----------------
 
+@st.cache_data(show_spinner=False)
 def compute_camp_totals(data):
     totals = {c: {"qty": 0, "amt": 0} for c in data["campsOrder"]}
     for it in data["items"]:
@@ -512,18 +518,11 @@ grand_qty = sum(it["q"] for it in data["items"])
 grand_amt = sum(it["a"] for it in data["items"])
 zero_camps = int((camp_df["재고 수량"] == 0).sum())
 
-@st.cache_resource
-def _saved_snapshot_keys():
-    """서버 전체에서 이미 저장한 (주, 재고 지문). 예전엔 접속(세션)마다 수천 행을 다시 써서
-    클라우드의 약한 CPU를 수십 초씩 붙잡았다 (2026-11-04 앱 로딩 멈춤의 원인 중 하나)."""
-    return set()
-
-
-_snap_key = (current_inventory_period()[2], len(data["items"]), grand_qty, grand_amt)
-if _snap_key not in _saved_snapshot_keys():
+_cur_period_label = current_inventory_period()[2]
+if st.session_state.get("_camp_value_snap_period") != _cur_period_label:
     try:
         save_inventory_value_snapshot("camp", build_camp_value_snapshot_rows(data))
-        _saved_snapshot_keys().add(_snap_key)
+        st.session_state["_camp_value_snap_period"] = _cur_period_label
     except Exception:
         pass  # 스냅샷 저장 실패해도 화면 표시는 계속 진행
 
@@ -589,13 +588,9 @@ _TAB_RENDERERS = {
     "purchase": tabs.purchase.render,
     "procurement": tabs.procurement.render,
     "inbound": tabs.inbound.render,
-    "inspection": tabs.inspection.render,
     "warehouse": tabs.warehouse.render,
 }
-# 탭마다 다른 key의 컨테이너에 그린다. Streamlit은 새 화면이 다 그려질 때까지 같은 자리의 이전 내용을
-# 흐리게 남겨 두는데, 컨테이너가 바뀌면 이전 탭 내용(예: 개요 그래프)이 바로 사라진다.
-with st.container(key=f"tab_body_{active_key}"):
-    _TAB_RENDERERS[active_key](ctx)
+_TAB_RENDERERS[active_key](ctx)
 
 st.divider()
 st.caption("업로드한 데이터는 이 앱에 접속하는 모든 사람에게 공유됩니다. 재고 엑셀/사용량 JSON을 다시 올리면 바로 반영돼요.")
