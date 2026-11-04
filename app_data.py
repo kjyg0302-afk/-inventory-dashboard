@@ -21,17 +21,52 @@ def save_data(key, obj):
     """app_data 테이블에 key로 JSON 데이터를 저장(upsert)한다."""
     conn = get_db_connection()
     with conn.session as session:
-        session.execute(
+        updated_at = session.execute(
             text(
                 """
                 insert into app_data (key, data, updated_at)
                 values (:key, CAST(:data AS jsonb), now())
                 on conflict (key) do update set data = excluded.data, updated_at = excluded.updated_at
+                returning updated_at
                 """
             ),
             {"key": key, "data": json.dumps(obj, ensure_ascii=False)},
-        )
+        ).scalar()
         session.commit()
+    # 공유 사본을 쓰는 키면 방금 저장한 것으로 바꿔 둔다 (DB에서 다시 읽지 않게).
+    _blob_version.clear()
+    if key in _blob_store():
+        _blob_store()[key] = (updated_at, obj)
+
+
+# ---------------- 서버 전체가 같이 쓰는 큰 데이터(재고·사용량) ----------------
+# 예전엔 접속(세션)마다 재고·사용량 JSON을 DB에서 따로 읽어 각자 들고 있었다. 접속마다 수 초씩 CPU를
+# 쓰고(2026-11-04 클라우드 로딩 멈춤의 원인), 로그인 시점 사본이라 다른 사람이 옮긴 재고가 안 보이고,
+# 그 낡은 사본으로 입고 확정을 하면 최신 재고를 덮어쓸 위험도 있었다. 이제 서버에 사본 하나만 두고
+# DB의 updated_at이 바뀌면(다른 서버·스크립트가 저장) 다시 읽는다.
+
+@st.cache_resource
+def _blob_store():
+    """key -> (updated_at, data)"""
+    return {}
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _blob_version(key):
+    conn = get_db_connection()
+    with conn.session as session:
+        return session.execute(text("select updated_at from app_data where key = :k"), {"k": key}).scalar()
+
+
+def load_shared(key):
+    """재고·사용량처럼 큰 데이터를 서버 공용 사본으로 돌려준다. 재고 이동처럼 고친 뒤에는 꼭 save_data로 저장할 것."""
+    store = _blob_store()
+    version = _blob_version(key)
+    hit = store.get(key)
+    if hit is None or hit[0] != version:
+        hit = (version, load_data(key))
+        store[key] = hit
+    return hit[1]
 
 
 def backup_data_before_overwrite(key, reason):
