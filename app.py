@@ -520,11 +520,18 @@ grand_qty = sum(it["q"] for it in data["items"])
 grand_amt = sum(it["a"] for it in data["items"])
 zero_camps = int((camp_df["재고 수량"] == 0).sum())
 
-_cur_period_label = current_inventory_period()[2]
-if st.session_state.get("_camp_value_snap_period") != _cur_period_label:
+@st.cache_resource
+def _saved_snapshot_keys():
+    """서버 전체에서 이미 저장한 (주, 재고 지문). 예전엔 접속(세션)마다 수천 행을 다시 써서
+    클라우드의 약한 CPU를 수십 초씩 붙잡았다 (2026-11-04 앱 로딩 멈춤의 원인 중 하나)."""
+    return set()
+
+
+_snap_key = (current_inventory_period()[2], len(data["items"]), grand_qty, grand_amt)
+if _snap_key not in _saved_snapshot_keys():
     try:
         save_inventory_value_snapshot("camp", build_camp_value_snapshot_rows(data))
-        st.session_state["_camp_value_snap_period"] = _cur_period_label
+        _saved_snapshot_keys().add(_snap_key)
     except Exception:
         pass  # 스냅샷 저장 실패해도 화면 표시는 계속 진행
 
