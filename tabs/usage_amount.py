@@ -27,36 +27,76 @@ CHART_MAX = 6
 CHART_COLORS = [ACCENT, ACCENT_2, "#4FC3A1", "#E36D8C", "#B48CF2", "#E8D45B"]
 
 
-def _render_item_chart(rows, pivot, periods, labels, value_label):
-    """고른 부품들의 기간별 사용량을 큰 선 그래프로 (하나면 영역 그래프, 여럿이면 색으로 구분)."""
-    long = pd.DataFrame([
-        {"부품": f"{r['품명']} ({code})", "기간": labels[p], value_label: float(pivot.at[code, p])}
-        for code, r in rows.iterrows()
-        for p in periods
-    ])
-    if len(rows) == 1:
-        st.markdown(f"**{long['부품'].iloc[0]}** · 합계 {rows['합계'].iloc[0]:,.0f}")
-        st.altair_chart(render_trend_chart(long, "기간", value_label, height=360), width="stretch")
-        return
+def _line_chart(long, value_label, height=380):
+    """기간별 선 그래프 + 점 위 숫자. '부품'이 여럿이면 색으로 구분한다."""
+    multi = long["부품"].nunique() > 1
     axis = dict(labelColor=CHART_MUTED, labelFontSize=11, domain=False, ticks=False)
-    chart = (
-        alt.Chart(long)
-        .mark_line(interpolate="monotone", strokeWidth=2.5, point=alt.OverlayMarkDef(size=40))
-        .encode(
-            x=alt.X("기간:O", sort=None, title=None, axis=alt.Axis(grid=False, **axis)),
-            y=alt.Y(f"{value_label}:Q", title=None, axis=alt.Axis(gridColor=CHART_GRID, tickCount=5, **axis)),
-            color=alt.Color(
-                "부품:N", sort=list(long["부품"].unique()),
-                scale=alt.Scale(range=CHART_COLORS),
-                legend=alt.Legend(orient="bottom", columns=2, title=None, labelColor=CHART_MUTED, labelLimit=320),
-            ),
-            tooltip=["부품:N", "기간:O", alt.Tooltip(f"{value_label}:Q", format=",.0f")],
+    color = (
+        alt.Color(
+            "부품:N", sort=list(long["부품"].unique()), scale=alt.Scale(range=CHART_COLORS),
+            legend=alt.Legend(orient="bottom", columns=2, title=None, labelColor=CHART_MUTED, labelLimit=320),
         )
-        .properties(height=380)
+        if multi else alt.value(ACCENT)
+    )
+    base = alt.Chart(long).encode(
+        x=alt.X("기간:O", sort=None, title=None, axis=alt.Axis(grid=False, labelAngle=0, **axis)),
+        y=alt.Y(f"{value_label}:Q", title=None, scale=alt.Scale(nice=True),
+                axis=alt.Axis(gridColor=CHART_GRID, tickCount=5, **axis)),
+        color=color,
+    )
+    layers = []
+    if not multi:
+        layers.append(base.mark_area(interpolate="monotone", opacity=0.15))
+    layers += [
+        base.mark_line(interpolate="monotone", strokeWidth=2.5),
+        base.mark_point(filled=True, size=55, opacity=1).encode(
+            tooltip=["부품:N", "기간:O", alt.Tooltip(f"{value_label}:Q", format=",.0f")]
+        ),
+        base.mark_text(dy=-13, fontSize=11, fontWeight="bold").encode(
+            text=alt.Text(f"{value_label}:Q", format=",.0f")
+        ),
+    ]
+    chart = (
+        alt.layer(*layers)
+        .properties(height=height)
         .configure_view(strokeWidth=0)
         .configure(background="transparent")
     )
     st.altair_chart(chart, width="stretch")
+
+
+def _render_item_chart(rows, pivot, periods, labels, value_label):
+    """고른 부품 그래프. 여러 개면 '선택 합계'(기본) 또는 '각각'으로 본다."""
+    def name(code):
+        return f"{rows.at[code, '품명']} ({code})"
+
+    mode = "각각"
+    if len(rows) > 1:
+        mode = st.segmented_control("그래프", ["선택 합계", "각각"], default="선택 합계", key="um_chart_mode") or "선택 합계"
+
+    if mode == "선택 합계":
+        sums = pivot.loc[rows.index, periods].sum()
+        st.markdown(f"**선택한 부품 {len(rows)}개 합계** · 전체 기간 {sums.sum():,.0f}")
+        st.caption(", ".join(name(c) for c in rows.index[:10]) + (f" 외 {len(rows) - 10}개" if len(rows) > 10 else ""))
+        long = pd.DataFrame({"부품": "선택 합계", "기간": [labels[p] for p in periods], value_label: sums.values})
+        _line_chart(long, value_label)
+        st.dataframe(
+            pd.DataFrame([sums.rename(labels)], index=["선택 합계"]),
+            column_config={c: st.column_config.NumberColumn(format="%,.0f") for c in labels.values()},
+        )
+        return
+
+    shown = rows.index[:CHART_MAX]
+    if len(shown) == 1:
+        st.markdown(f"**{name(shown[0])}** · 합계 {rows.at[shown[0], '합계']:,.0f}")
+    long = pd.DataFrame([
+        {"부품": name(code), "기간": labels[p], value_label: float(pivot.at[code, p])}
+        for code in shown
+        for p in periods
+    ])
+    _line_chart(long, value_label)
+    if len(rows) > CHART_MAX:
+        st.caption(f"'각각' 그래프는 앞의 {CHART_MAX}개만 그렸어요. 전부 더한 값은 '선택 합계'에서 볼 수 있어요.")
 
 
 def render_usage_matrix(sku_names):
@@ -144,11 +184,9 @@ def render_usage_matrix(sku_names):
         picked = list(table.index)
     with chart_box:
         if picked:
-            _render_item_chart(table.loc[picked[:CHART_MAX]], pivot, periods, labels, value_label)
-            if len(picked) > CHART_MAX:
-                st.caption(f"그래프는 앞의 {CHART_MAX}개만 그렸어요.")
+            _render_item_chart(table.loc[picked], pivot, periods, labels, value_label)
         else:
-            st.caption(f":material/touch_app: 표에서 줄을 누르면(여러 개 가능) 그 부품의 그래프가 여기 크게 나와요. "
+            st.caption(f":material/touch_app: 표에서 줄을 누르면 그 부품의 그래프가 여기 크게 나와요. 여러 개를 고르면 합계도 볼 수 있어요. "
                        f"검색 결과가 {CHART_MAX}개 이하면 자동으로 그려요.")
 
     out = io.BytesIO()
