@@ -10,6 +10,7 @@ import streamlit as st
 from categories import list_categories, list_category_items
 from formatting import (
     ACCENT,
+    ACCENT_2,
     CHART_GRID,
     CHART_MUTED,
     fmt_won,
@@ -22,6 +23,40 @@ from usage_data import list_usage_camps, load_usage_period_item
 ALL = "전체"
 SORT_TOTAL = "합계 많은 순"
 SORT_RISING = "최근 증가 순"
+CHART_MAX = 6
+CHART_COLORS = [ACCENT, ACCENT_2, "#4FC3A1", "#E36D8C", "#B48CF2", "#E8D45B"]
+
+
+def _render_item_chart(rows, pivot, periods, labels, value_label):
+    """고른 부품들의 기간별 사용량을 큰 선 그래프로 (하나면 영역 그래프, 여럿이면 색으로 구분)."""
+    long = pd.DataFrame([
+        {"부품": f"{r['품명']} ({code})", "기간": labels[p], value_label: float(pivot.at[code, p])}
+        for code, r in rows.iterrows()
+        for p in periods
+    ])
+    if len(rows) == 1:
+        st.markdown(f"**{long['부품'].iloc[0]}** · 합계 {rows['합계'].iloc[0]:,.0f}")
+        st.altair_chart(render_trend_chart(long, "기간", value_label, height=360), width="stretch")
+        return
+    axis = dict(labelColor=CHART_MUTED, labelFontSize=11, domain=False, ticks=False)
+    chart = (
+        alt.Chart(long)
+        .mark_line(interpolate="monotone", strokeWidth=2.5, point=alt.OverlayMarkDef(size=40))
+        .encode(
+            x=alt.X("기간:O", sort=None, title=None, axis=alt.Axis(grid=False, **axis)),
+            y=alt.Y(f"{value_label}:Q", title=None, axis=alt.Axis(gridColor=CHART_GRID, tickCount=5, **axis)),
+            color=alt.Color(
+                "부품:N", sort=list(long["부품"].unique()),
+                scale=alt.Scale(range=CHART_COLORS),
+                legend=alt.Legend(orient="bottom", columns=2, title=None, labelColor=CHART_MUTED, labelLimit=320),
+            ),
+            tooltip=["부품:N", "기간:O", alt.Tooltip(f"{value_label}:Q", format=",.0f")],
+        )
+        .properties(height=380)
+        .configure_view(strokeWidth=0)
+        .configure(background="transparent")
+    )
+    st.altair_chart(chart, width="stretch")
 
 
 def render_usage_matrix(sku_names):
@@ -95,7 +130,26 @@ def render_usage_matrix(sku_names):
         num = st.column_config.NumberColumn(format="₩%,.0f")
     column_config = {c: num for c in ["합계", "최근 증감", *labels.values()]}
     column_config["추세"] = st.column_config.LineChartColumn("추세", width="small")
-    st.dataframe(table, hide_index=True, column_config=column_config, height=560)
+    chart_box = st.container()
+    event = st.dataframe(
+        table, hide_index=True, column_config=column_config, height=560,
+        # 조건이 바뀌면 줄 번호가 달라지므로 선택도 새로 시작한다
+        on_select="rerun", selection_mode="multi-row",
+        key=f"um_table_{unit}_{value_label}_{span}_{camp}_{category}_{query}_{sort}",
+    )
+
+    # 표에서 고른 줄, 아니면 검색 결과가 몇 개 안 될 때 그 부품들을 크게 그린다
+    picked = [table.index[i] for i in event.selection.rows if i < len(table)]
+    if not picked and query and len(table) <= CHART_MAX:
+        picked = list(table.index)
+    with chart_box:
+        if picked:
+            _render_item_chart(table.loc[picked[:CHART_MAX]], pivot, periods, labels, value_label)
+            if len(picked) > CHART_MAX:
+                st.caption(f"그래프는 앞의 {CHART_MAX}개만 그렸어요.")
+        else:
+            st.caption(f":material/touch_app: 표에서 줄을 누르면(여러 개 가능) 그 부품의 그래프가 여기 크게 나와요. "
+                       f"검색 결과가 {CHART_MAX}개 이하면 자동으로 그려요.")
 
     out = io.BytesIO()
     table.drop(columns=["추세"]).to_excel(out, index=False, sheet_name=f"부품별 {unit_label} {value_label}")
