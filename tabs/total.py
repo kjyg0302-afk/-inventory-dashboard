@@ -6,6 +6,7 @@ import streamlit as st
 
 from formatting import ACCENT, CHART_GRID, CHART_MUTED, fmt_int, fmt_won
 from boxhero import get_boxhero_token, fetch_boxhero_items
+from procurement import load_purchase_lines
 from snapshots import load_inventory_value_trend
 from usage_calc import estimate_depletion, weekly_usage_rate
 
@@ -34,11 +35,37 @@ def render(ctx):
     total_qty = warehouse_qty + camp_qty
     total_amt = warehouse_amt + camp_amt
 
+    # 미입고: 구매·PO 원장에서 국내(대구·한국)로 들어올 잔량. 해외 거점 입고분은 국내 재고가 아니라 뺀다.
+    try:
+        lines = load_purchase_lines()
+        incoming = lines[(lines["open_qty"] > 0) & lines["domestic"]]
+    except Exception:
+        incoming = None
+    if incoming is not None:
+        inc_sku = incoming["sku"].fillna("").str.strip().str.upper()
+        incoming_qty = int(incoming["open_qty"].sum())
+        incoming_by_sku = incoming[inc_sku != ""].assign(key=inc_sku).groupby("key").agg(
+            qty=("open_qty", "sum"), name=("item_name", "last"), first_on=("expected_on", "min")
+        )
+        incoming_no_sku_qty = int(incoming.loc[inc_sku == "", "open_qty"].sum())
+    else:
+        incoming_qty, incoming_by_sku, incoming_no_sku_qty = 0, pd.DataFrame(columns=["qty", "name", "first_on"]), 0
+
     st.caption("수량 기준")
     k1, k2, k3 = st.columns(3)
     k1.metric("지바이크 전체 재고 수량", f"{fmt_int(total_qty)}개", border=True)
     k2.metric("캠프 재고 (36곳 합계)", f"{fmt_int(camp_qty)}개", border=True)
     k3.metric("물류창고 재고", f"{fmt_int(warehouse_qty)}개", border=True)
+    if incoming is not None:
+        i1, i2, _ = st.columns(3)
+        i1.metric("미입고 수량 (국내 입고 예정)", f"{fmt_int(incoming_qty)}개", border=True)
+        i2.metric("전체 재고 + 미입고", f"{fmt_int(total_qty + incoming_qty)}개", border=True)
+        st.caption(
+            f"미입고는 구매·PO 원장에서 입고처가 대구·한국인 PO의 남은 수량이에요 (PO {incoming['po_no'].nunique():,}건 · "
+            f"{len(incoming):,}줄). 해외 거점으로 가는 물량은 빼고 셌어요."
+        )
+    else:
+        st.caption("구매·PO 원장을 불러오지 못해 미입고 수량은 빠져 있어요.")
 
     st.caption("금액 기준")
     m1, m2, m3 = st.columns(3)
@@ -131,7 +158,7 @@ def render(ctx):
         it["c"].strip().upper(): it for it in data["items"] if it.get("c")
     }
     wh_by_sku = {it["sku"].strip().upper(): it for it in wh_items if it.get("sku")}
-    all_skus = set(camp_by_sku) | set(wh_by_sku)
+    all_skus = set(camp_by_sku) | set(wh_by_sku) | set(incoming_by_sku.index)
 
     compare_rows = []
     for sku in all_skus:
@@ -142,10 +169,12 @@ def render(ctx):
         wh_q = wh_it.get("quantity", 0) if wh_it else 0
         wh_price = float(wh_it.get("price") or 0) if wh_it else 0
         wh_a = wh_q * wh_price
-        name = camp_it["n"] if camp_it else wh_it["name"]
+        inc = incoming_by_sku.loc[sku] if sku in incoming_by_sku.index else None
+        inc_q = int(inc["qty"]) if inc is not None else 0
+        name = camp_it["n"] if camp_it else wh_it["name"] if wh_it else inc["name"]
         total_q = wh_q + camp_q
         # 사용량 조회는 원래 표기(대소문자)를 써야 정확히 매칭된다 (join용 sku는 대문자로 통일돼있음).
-        orig_code = camp_it["c"] if camp_it else wh_it["sku"]
+        orig_code = camp_it["c"] if camp_it else wh_it["sku"] if wh_it else sku
         weeks, depletion_date = estimate_depletion(usage, total_q, orig_code)
         compare_rows.append(
             {
@@ -154,6 +183,9 @@ def render(ctx):
                 "물류창고 수량": wh_q,
                 "캠프 재고 수량": camp_q,
                 "합계 수량": total_q,
+                "미입고 수량": inc_q,
+                "재고+미입고": total_q + inc_q,
+                "입고 예정일": inc["first_on"].date().isoformat() if inc is not None and pd.notna(inc["first_on"]) else None,
                 "재고 금액": wh_a + camp_a,
                 "주 사용량": weekly_usage_rate(usage, orig_code),
                 "소진 예상(주)": weeks,
@@ -170,11 +202,15 @@ def render(ctx):
             | compare_df["품명"].str.lower().str.contains(q, regex=False)
         ]
     st.caption(
-        f"{len(compare_df):,}개 SKU (창고·캠프 어느 한쪽에라도 있는 품목 전체). "
-        "주 사용량/예상 소진일은 캠프 사용량 엑셀 기준(전체 캠프 합산)이에요."
+        f"{len(compare_df):,}개 SKU (창고·캠프·미입고 중 어디에라도 있는 품목 전체). "
+        "주 사용량/예상 소진일은 캠프 사용량 엑셀 기준(전체 캠프 합산)이고, 지금 재고(미입고 제외)로 계산했어요. "
+        "입고 예정일은 그 SKU의 미입고 중 가장 이른 날짜예요."
+        + (f" SKU가 없는 미입고 {incoming_no_sku_qty:,}개는 이 표에 SKU로 묶을 수 없어 빠져 있어요."
+           if incoming_no_sku_qty else "")
     )
     display_compare_df = compare_df.copy()
     display_compare_df["예상 소진일"] = display_compare_df["예상 소진일"].fillna("-")
+    display_compare_df["입고 예정일"] = display_compare_df["입고 예정일"].fillna("-")
     st.dataframe(
         display_compare_df,
         hide_index=True,
@@ -182,6 +218,8 @@ def render(ctx):
             "물류창고 수량": st.column_config.NumberColumn(format="%,d개"),
             "캠프 재고 수량": st.column_config.NumberColumn(format="%,d개"),
             "합계 수량": st.column_config.NumberColumn(format="%,d개"),
+            "미입고 수량": st.column_config.NumberColumn(format="%,d개"),
+            "재고+미입고": st.column_config.NumberColumn(format="%,d개"),
             "재고 금액": st.column_config.NumberColumn(format="₩%,d"),
             "주 사용량": st.column_config.NumberColumn(format="%.1f개/주"),
             "소진 예상(주)": st.column_config.NumberColumn(format="%.1f주"),
