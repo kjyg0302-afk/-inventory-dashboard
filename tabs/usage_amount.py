@@ -1,10 +1,112 @@
 """월별 사용 금액 탭."""
 
+import io
+from datetime import date
+
 import altair as alt
 import pandas as pd
 import streamlit as st
 
-from formatting import ACCENT, CHART_GRID, CHART_MUTED, fmt_won, monthly_mean_excluding_current, render_trend_chart
+from categories import list_categories, list_category_items
+from formatting import (
+    ACCENT,
+    CHART_GRID,
+    CHART_MUTED,
+    fmt_won,
+    monthly_mean_excluding_current,
+    render_trend_chart,
+    weeknum,
+)
+from usage_data import list_usage_camps, load_usage_period_item
+
+ALL = "전체"
+SORT_TOTAL = "합계 많은 순"
+SORT_RISING = "최근 증가 순"
+
+
+def render_usage_matrix(sku_names):
+    """(관리자) 부품 전체를 월별/주별로 펼친 사용량 표 + 엑셀 다운로드."""
+    c1, c2, c3 = st.columns(3)
+    unit_label = c1.segmented_control("단위", ["월별", "주별"], default="월별", key="um_unit") or "월별"
+    value_label = c2.segmented_control("값", ["수량", "금액"], default="수량", key="um_value") or "수량"
+    unit = "month" if unit_label == "월별" else "week"
+    if unit == "month":
+        span = c3.selectbox("기간", [3, 6, 12, ALL], index=1, key="um_span_m",
+                            format_func=lambda v: v if v == ALL else f"최근 {v}개월")
+    else:
+        span = c3.selectbox("기간", [8, 12, 26, 52, ALL], index=1, key="um_span_w",
+                            format_func=lambda v: v if v == ALL else f"최근 {v}주")
+
+    f1, f2, f3, f4 = st.columns([1, 1, 1.4, 1])
+    camp = f1.selectbox("캠프", [ALL] + list_usage_camps(), key="um_camp")
+    category = f2.selectbox("카테고리", [ALL] + list_categories(), key="um_category")
+    query = f3.text_input("부품코드·품명 검색", key="um_query").strip().lower()
+    sort = f4.selectbox("정렬", [SORT_TOTAL, SORT_RISING], key="um_sort")
+
+    df = load_usage_period_item(unit, None if camp == ALL else camp)
+    if df.empty:
+        st.info("이 조건에 해당하는 사용량 데이터가 없어요.")
+        return
+    value_col = "qty" if value_label == "수량" else "amt"
+    periods = sorted(df["period"].unique())
+    if span != ALL:
+        periods = periods[-span:]
+    df = df[df["period"].isin(periods)]
+
+    pivot = df.pivot_table(index="item_code", columns="period", values=value_col, aggfunc="sum", fill_value=0)
+    pivot = pivot.reindex(columns=periods, fill_value=0)
+    names = df.groupby("item_code")["item_name"].max()
+    table = pd.DataFrame({
+        "부품코드": pivot.index,
+        "품명": [sku_names.get(c) or names.get(c) or "-" for c in pivot.index],
+    }, index=pivot.index)
+
+    if category != ALL:
+        table = table[table["부품코드"].isin(set(list_category_items(category)))]
+    if query:
+        table = table[
+            table["부품코드"].str.lower().str.contains(query, regex=False)
+            | table["품명"].str.lower().str.contains(query, regex=False)
+        ]
+    pivot = pivot.loc[table.index]
+
+    # 아직 끝나지 않은 이번 달/이번 주는 열 이름에 표시하고, 증가 계산에서는 뺀다
+    today = date.today()
+    current = today.strftime("%Y-%m") if unit == "month" else f"{today.year}-{weeknum(today):02d}주"
+    closed = [p for p in periods if p != current]
+    table["합계"] = pivot.sum(axis=1)
+    if len(closed) >= 2:
+        table["최근 증감"] = pivot[closed[-1]] - pivot[closed[:-1]].mean(axis=1)
+    else:
+        table["최근 증감"] = 0.0
+    table["추세"] = pivot.values.tolist()
+    labels = {p: f"{p} (진행중)" if p == current else p for p in periods}
+    table = table.join(pivot.rename(columns=labels))
+    table = table.sort_values("최근 증감" if sort == SORT_RISING else "합계", ascending=False)
+
+    st.caption(
+        f"부품 {len(table):,}개 · {periods[0]} ~ {periods[-1]} · {camp if camp != ALL else '전체 캠프 합산'}"
+        + (f" · 카테고리 {category}" if category != ALL else "")
+        + ". '최근 증감'은 마지막으로 끝난 기간이 그 앞 기간들의 평균보다 얼마나 많은지예요."
+    )
+    if value_label == "수량":
+        num = st.column_config.NumberColumn(format="%,.0f")
+    else:
+        num = st.column_config.NumberColumn(format="₩%,.0f")
+    column_config = {c: num for c in ["합계", "최근 증감", *labels.values()]}
+    column_config["추세"] = st.column_config.LineChartColumn("추세", width="small")
+    st.dataframe(table, hide_index=True, column_config=column_config, height=560)
+
+    out = io.BytesIO()
+    table.drop(columns=["추세"]).to_excel(out, index=False, sheet_name=f"부품별 {unit_label} {value_label}")
+    st.download_button(
+        "엑셀 다운로드",
+        out.getvalue(),
+        file_name=f"부품별_{unit_label}_{value_label}_{periods[0]}_{periods[-1]}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        icon=":material/download:",
+        key="um_download",
+    )
 
 
 def render(ctx):
@@ -48,7 +150,15 @@ def render(ctx):
         column_config={"금액": st.column_config.NumberColumn(format="₩%,d")},
     )
 
-    sub_camp, sub_sku = st.tabs([":material/location_on: 캠프별 사용 금액", ":material/settings: 부품별 사용 금액"])
+    sub_labels = [":material/location_on: 캠프별 사용 금액", ":material/settings: 부품별 사용 금액"]
+    is_admin = ctx.auth["role"] == "admin"
+    if is_admin:
+        sub_labels.append(":material/table_chart: 부품별 사용량 표")
+    sub_tabs = st.tabs(sub_labels)
+    sub_camp, sub_sku = sub_tabs[0], sub_tabs[1]
+    if is_admin:
+        with sub_tabs[2]:
+            render_usage_matrix(usage.get("skuNames") or {})
 
     with sub_camp:
         camp_totals = (

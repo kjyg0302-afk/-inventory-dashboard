@@ -235,3 +235,29 @@ def load_recent_monthly_usage_by_sku(item_codes, months=3):
         params={"cur_year": now.year, "cur_month": now.month, "months": months, "codes": item_codes},
         ttl=30,
     )
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_usage_period_item(unit, camp=None):
+    """품목 x 기간(월 'YYYY-MM' 또는 주 'YYYY-WW주')별 사용 수량/금액 (usage_facts 기준, camp 없으면 전체 합산)."""
+    period = (
+        "year || '-' || lpad(month::text, 2, '0')" if unit == "month"
+        else "year || '-' || lpad(week::text, 2, '0') || '주'"
+    )
+    conn = get_db_connection()
+    return conn.query(
+        f"""
+        select item_code, max(item_name) as item_name, {period} as period, sum(qty) as qty, sum(amt) as amt
+        from usage_facts
+        where (cast(:camp as text) is null or camp = :camp)
+        group by item_code, period
+        """,
+        params={"camp": camp},
+        ttl=0,
+    )
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def list_usage_camps():
+    conn = get_db_connection()
+    return conn.query("select distinct camp from usage_facts order by camp", ttl=0)["camp"].tolist()
