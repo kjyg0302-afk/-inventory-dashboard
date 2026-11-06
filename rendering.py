@@ -5,7 +5,7 @@ import streamlit as st
 
 from auth import NO_STOCK_ACCOUNTS
 from formatting import fmt_request_timeline, fmt_transfer_qty
-from stock_ops import find_item_by_code, deduct_camp_stock, add_camp_stock
+from stock_ops import find_item_by_code, deduct_camp_stock, deduct_for_receipt, add_camp_stock
 from app_data import save_data
 from transfers import (
     list_transfer_requests,
@@ -122,22 +122,21 @@ def render_in_transit_request_row(r, data, my_name, key_prefix="", allow_revert=
             if not my_name.strip():
                 st.error("내 이름을 먼저 입력해주세요.", icon=":material/error:")
             else:
+                # 보내는 캠프 재고가 앱 데이터상 모자라거나 없어도 입고는 막지 않는다 (있는 만큼만 차감).
                 item = find_item_by_code(data, r["item_code"])
-                try:
-                    if r["from_camp"] in NO_STOCK_ACCOUNTS:
-                        moved_amt = 0
-                    else:
-                        moved_amt = deduct_camp_stock(item, r["from_camp"], int(recv_qty))
-                except ValueError as e:
-                    st.error(str(e), icon=":material/error:")
-                else:
+                moved_amt = 0
+                if item is not None:
+                    if r["from_camp"] not in NO_STOCK_ACCOUNTS:
+                        moved_amt, short = deduct_for_receipt(item, r["from_camp"], int(recv_qty))
+                        if short:
+                            st.toast(f"{r['from_camp']} 재고가 {short}개 모자라 있는 만큼만 차감했어요.", icon=":material/info:")
                     if r["to_camp"] not in NO_STOCK_ACCOUNTS:
                         add_camp_stock(item, r["to_camp"], int(recv_qty), moved_amt)
                     save_data("inventory", data)
-                    complete_transfer_request(r["id"], my_name.strip(), moved_amt, recv_qty)
-                    list_transfer_requests.clear()
-                    list_all_transfer_requests.clear()
-                    st.rerun()
+                complete_transfer_request(r["id"], my_name.strip(), moved_amt, recv_qty)
+                list_transfer_requests.clear()
+                list_all_transfer_requests.clear()
+                st.rerun()
 
 
 def render_pending_warehouse_order_row(r, my_name, key_prefix=""):

@@ -32,3 +32,16 @@ def add_camp_stock(item, camp, qty, amt):
         item["x"][camp] = [pair[0] + qty, pair[1] + amt]
     else:
         item["x"][camp] = [qty, amt]
+
+
+def deduct_for_receipt(item, camp, qty):
+    """입고완료용 차감: 보내는 캠프 재고가 모자라도 막지 않고 있는 만큼만 뺀다
+    (재고 데이터가 실물보다 늦게 갱신되는 경우가 있어서). 받는 쪽에 더할 금액과 모자랐던 수량을 반환한다."""
+    pair = item["x"].get(camp)
+    have = int(pair[0]) if pair else 0
+    if have >= qty:
+        return deduct_camp_stock(item, camp, qty), 0
+    unit_amt = (pair[1] / pair[0]) if pair and pair[0] else (item["a"] / item["q"] if item.get("q") else 0)
+    if have > 0:
+        deduct_camp_stock(item, camp, have)
+    return round(unit_amt * qty), qty - have
