@@ -414,3 +414,31 @@ begin
     end if;
   end loop;
 end $$;
+
+-- 외부 읽기 전용 API (2026-11-12): 동료가 만든 HTML 화면이 Supabase REST(공개 키 + 로그인)로 읽는다.
+-- api_readers에 등록된 Supabase Auth 계정만 행이 보이고, 그 외(anon, 다른 가입자)는 0행.
+-- 수량만 공개하고 금액·단가는 뺀다. 계정 접근을 끊으려면 api_readers에서 그 줄을 지우면 된다.
+create table if not exists api_readers (
+    user_id uuid primary key,
+    email text,
+    note text,
+    created_at timestamptz not null default now()
+);
+alter table api_readers enable row level security;
+
+create or replace view api_camp_stock as
+select it->>'c' as sku, it->>'n' as item_name, x.key as camp, (x.value->>0)::numeric as qty,
+       d.updated_at as data_updated_at
+from app_data d
+cross join lateral jsonb_array_elements(d.data->'items') it
+cross join lateral jsonb_each(it->'x') x
+where d.key = 'inventory'
+  and exists (select 1 from api_readers r where r.user_id = auth.uid());
+
+create or replace view api_usage_weekly as
+select year, month, week, camp, item_code as sku, item_name, qty
+from usage_facts
+where exists (select 1 from api_readers r where r.user_id = auth.uid());
+
+revoke all on api_camp_stock, api_usage_weekly from public, anon, authenticated;
+grant select on api_camp_stock, api_usage_weekly to authenticated;
