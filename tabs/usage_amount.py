@@ -47,6 +47,18 @@ def _line_chart(long, value_label, height=380):
     layers = []
     if not multi:
         layers.append(base.mark_area(interpolate="monotone", opacity=0.15))
+    # 평균선: 진행 중인 기간은 빼고 부품별 평균을 점선으로
+    closed = long[~long["기간"].astype(str).str.endswith("(진행중)")]
+    if not closed.empty:
+        means = closed.groupby("부품", sort=False)[value_label].mean().reset_index()
+        means["라벨"] = means[value_label].map(lambda v: f"평균 {v:,.0f}")
+        mean_base = alt.Chart(means).encode(y=alt.Y(f"{value_label}:Q"), color=color)
+        layers += [
+            mean_base.mark_rule(strokeDash=[6, 4], strokeWidth=1.5, opacity=0.8),
+            mean_base.mark_text(align="left", dx=4, dy=-7, fontSize=11, fontWeight="bold").encode(
+                x=alt.value(0), text="라벨:N"
+            ),
+        ]
     layers += [
         base.mark_line(interpolate="monotone", strokeWidth=2.5),
         base.mark_point(filled=True, size=55, opacity=1).encode(
@@ -115,7 +127,10 @@ def render_usage_matrix(sku_names):
     f1, f2, f3, f4 = st.columns([1, 1, 1.4, 1])
     camp = f1.selectbox("캠프", [ALL] + list_usage_camps(), key="um_camp")
     category = f2.selectbox("카테고리", [ALL] + list_categories(), key="um_category")
-    query = f3.text_input("부품코드·품명 검색", key="um_query").strip().lower()
+    query = f3.text_input(
+        "부품코드·품명 검색", key="um_query",
+        help="띄어쓰기 = 모두 포함(AND), 쉼표 = 하나라도 포함(OR). 예: '뒷바퀴 앗세이, 앞바퀴'",
+    ).strip().lower()
     sort = f4.selectbox("정렬", [SORT_TOTAL, SORT_RISING], key="um_sort")
 
     df = load_usage_period_item(unit, None if camp == ALL else camp)
@@ -139,10 +154,15 @@ def render_usage_matrix(sku_names):
     if category != ALL:
         table = table[table["부품코드"].isin(set(list_category_items(category)))]
     if query:
-        table = table[
-            table["부품코드"].str.lower().str.contains(query, regex=False)
-            | table["품명"].str.lower().str.contains(query, regex=False)
-        ]
+        hay = (table["부품코드"] + " " + table["품명"]).str.lower()
+        groups = [g.split() for g in query.split(",") if g.strip()]
+        hit = pd.Series(False, index=table.index)
+        for words in groups:  # 쉼표 = OR, 띄어쓰기 = AND
+            m = pd.Series(True, index=table.index)
+            for w in words:
+                m &= hay.str.contains(w, regex=False)
+            hit |= m
+        table = table[hit]
     pivot = pivot.loc[table.index]
 
     # 아직 끝나지 않은 이번 달/이번 주는 열 이름에 표시하고, 증가 계산에서는 뺀다
